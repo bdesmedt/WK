@@ -100,27 +100,27 @@ CAPEX_ACCOUNTS = {
 
 @st.cache_resource
 def get_odoo_connection():
-    """Initialize Odoo connection."""
+    """Initialize Odoo connection using API key authentication."""
     url = st.secrets.get("ODOO_URL", os.environ.get("ODOO_URL", "https://wakuli.odoo.com"))
     db = st.secrets.get("ODOO_DB", os.environ.get("ODOO_DB", "wakuli-production-10206791"))
     username = st.secrets.get("ODOO_USER", os.environ.get("ODOO_USER", "accounting@fidfinance.nl"))
-    password = st.secrets.get("ODOO_PASSWORD", os.environ.get("ODOO_PASSWORD", ""))
-    
-    if not username or not password:
-        return None, None, None, None
-    
+    api_key = st.secrets.get("ODOO_API_KEY", os.environ.get("ODOO_API_KEY", ""))
+
+    if not username or not api_key:
+        return None, None, None, None, None
+
     try:
         common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
-        uid = common.authenticate(db, username, password, {})
+        uid = common.authenticate(db, username, api_key, {})
         models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
-        return url, db, uid, models, password
+        return url, db, uid, models, api_key
     except Exception as e:
         st.error(f"Connection error: {e}")
         return None, None, None, None, None
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_capex_actuals(_models, db, uid, password, account_codes, year):
+def fetch_capex_actuals(_models, db, uid, api_key, account_codes, year):
     """Fetch actual CAPEX bookings from Odoo."""
     if not _models:
         return pd.DataFrame()
@@ -138,7 +138,7 @@ def fetch_capex_actuals(_models, db, uid, password, account_codes, year):
     ] + account_domain
     
     try:
-        lines = _models.execute_kw(db, uid, password, 'account.analytic.line', 'search_read',
+        lines = _models.execute_kw(db, uid, api_key, 'account.analytic.line', 'search_read',
             [domain],
             {'fields': ['date', 'amount', 'name', 'general_account_id', 'x_plan2_id', 'move_line_id'],
              'limit': 5000})
@@ -245,7 +245,7 @@ def main():
     
     if connection[0] is None:
         st.warning("⚠️ Odoo credentials not configured. Using demo data.")
-        st.info("To connect to Odoo, set these secrets in Streamlit Cloud or environment variables:\n- ODOO_URL\n- ODOO_DB\n- ODOO_USER\n- ODOO_PASSWORD")
+        st.info("To connect to Odoo, set these secrets in Streamlit Cloud or environment variables:\n- ODOO_URL\n- ODOO_DB\n- ODOO_USER\n- ODOO_API_KEY")
 
         # Demo data for each selected year
         demo_frames = []
@@ -263,11 +263,11 @@ def main():
             demo_frames.append(pd.DataFrame(demo_data))
         actuals_df = pd.concat(demo_frames, ignore_index=True)
     else:
-        url, db, uid, models, password = connection
+        url, db, uid, models, api_key = connection
         # Fetch data for each selected year and combine
         year_frames = []
         for yr in selected_years:
-            yr_df = fetch_capex_actuals(models, db, uid, password, selected_accounts, yr)
+            yr_df = fetch_capex_actuals(models, db, uid, api_key, selected_accounts, yr)
             if not yr_df.empty:
                 yr_df['year'] = yr
                 year_frames.append(yr_df)
