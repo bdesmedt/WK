@@ -452,6 +452,66 @@ ODOO_MODULES = {
 
 
 # ──────────────────────────────────────────────
+# NMBRS (VISMA) HR/PAYROLL CONFIGURATION
+# ──────────────────────────────────────────────
+# Nmbrs provides employee, salary, and schedule data. Set up credentials
+# in .streamlit/secrets.toml or Streamlit Cloud secrets:
+#
+#   NMBRS_USERNAME = "user@company.com"
+#   NMBRS_TOKEN    = "your-api-token"
+#   NMBRS_DOMAIN   = "your-domain"     # optional, for domain-based auth
+#   NMBRS_ENV      = "production"       # or "sandbox" for testing
+#   NMBRS_COMPANY_ID = "12345"          # your company ID in Nmbrs
+#
+# To find your company ID, use the Nmbrs diagnostic in the Settings tab.
+NMBRS_CONFIG = {
+    "enabled": True,         # Set to False to disable Nmbrs integration
+    "company_id": 0,         # Override in secrets as NMBRS_COMPANY_ID
+    "full_time_hours": 40,   # Weekly hours for FTE=1.0 (NL standard: 40)
+    "employer_burden_pct": 0.30,  # Social charges, pension, insurance on top of gross
+}
+
+# Map Nmbrs department names or cost center codes to Wakuli store codes.
+# The connector uses this to assign employees to the correct store.
+# Keys can be exact department names, cost center codes, or substrings.
+#
+# To discover your Nmbrs departments, use the "Nmbrs Department Explorer"
+# in the Settings tab after connecting.
+#
+# Example:
+#   "Linnaeusstraat": "LIN",
+#   "Jan Pieter Heijestraat": "JPH",
+#   "CC001": "LIN",   # cost center code
+NMBRS_DEPARTMENT_TO_STORE = {
+    # ── Fill in your Nmbrs department → store mapping ──
+    # "Department Name in Nmbrs": "STORE_CODE",
+    "Linnaeusstraat": "LIN",
+    "Jan Pieter Heijestraat": "JPH",
+    "Haarlemmerplein": "HAP",
+    "Wagenaarstraat": "WAG",
+    "Amstelveenseweg": "AMS",
+    "Vijzelgracht": "VIJZ",
+    "Twijnstraat": "TWIJN",
+    "Ziekerstraat": "ZIEK",
+    "Van Woustraat": "WOU",
+    "Nobelstraat": "NOB",
+    "Jacob van Campenstraat": "JAC",
+    "Bajes": "BAJES",
+    "Fahrenheitstraat": "FAH",
+    "Meent": "MEENT",
+    "Lusthofstraat": "LUST",
+    "Visstraat": "VIS",
+    "Theresiastraat": "THER",
+    "Piet Heinstraat": "PIET",
+    "Haarlemmerstraat": "HAS",
+    "Stoeldraaierstraat": "STOEL",
+    "Overhead": "OOH",
+    "Head Office": "OOH",
+    "Hoofdkantoor": "OOH",
+}
+
+
+# ──────────────────────────────────────────────
 # APP CONFIGURATION
 # ──────────────────────────────────────────────
 APP_CONFIG = {

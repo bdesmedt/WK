@@ -20,6 +20,7 @@ from config import (
     TARGETS, SOURCING_ORIGINS, PRODUCT_CATEGORIES, DAYPARTS,
     APP_CONFIG, COLOR_POSITIVE, COLOR_NEGATIVE, COLOR_WARNING,
     ACCOUNT_MAP, ODOO_MODULES, ODOO_ID_TO_STORE, get_all_account_codes,
+    NMBRS_CONFIG, NMBRS_DEPARTMENT_TO_STORE,
 )
 from styles import get_brand_css
 from odoo_connector import (
@@ -27,6 +28,11 @@ from odoo_connector import (
     fetch_cost_data, fetch_pos_orders, fetch_employees,
     fetch_chart_of_accounts, fetch_analytic_accounts,
     check_data_availability, get_secret,
+)
+from nmbrs_connector import (
+    is_nmbrs_configured, build_labor_data_from_nmbrs,
+    check_nmbrs_connection, fetch_nmbrs_employees,
+    fetch_nmbrs_departments, fetch_nmbrs_salary_data,
 )
 from demo_data import generate_all_demo_data
 from kpi_engine import (
@@ -118,12 +124,17 @@ def render_sidebar():
         st.markdown("---")
 
         # Connection status
-        st.markdown("**Data Source**")
+        st.markdown("**Data Sources**")
         odoo_user = get_secret("ODOO_USER", "")
         if odoo_user:
             st.success(f"Odoo: {odoo_user[:20]}...")
         else:
-            st.info("Demo mode (no Odoo)")
+            st.info("Odoo: not configured")
+
+        if is_nmbrs_configured():
+            st.success("Nmbrs: connected")
+        else:
+            st.info("Nmbrs: not configured")
 
         st.markdown("---")
         st.markdown("""
@@ -208,6 +219,17 @@ def load_data(selected_years, selected_accounts):
         demo['uid'] = None
         demo['password'] = None
         data_sources = {s: 'demo' for s in ['revenue', 'costs', 'capex']}
+
+    # --- Nmbrs: labor/employee data (independent of Odoo) ---
+    if NMBRS_CONFIG.get("enabled") and is_nmbrs_configured():
+        nmbrs_labor = build_labor_data_from_nmbrs(demo['revenue'], years_tuple)
+        if not nmbrs_labor.empty:
+            demo['labor'] = nmbrs_labor
+            data_sources['labor'] = 'nmbrs'
+        else:
+            data_sources['labor'] = 'demo'
+    else:
+        data_sources['labor'] = 'demo'
 
     demo['data_sources'] = data_sources
     return demo
@@ -1411,6 +1433,7 @@ def render_settings_tab(data, selected_years):
 
     source_labels = {
         'odoo': ('Odoo (live)', 'good'),
+        'nmbrs': ('Nmbrs (live)', 'good'),
         'demo': ('Demo data', 'warning'),
     }
 
@@ -1536,21 +1559,183 @@ def render_settings_tab(data, selected_years):
         st.info("Connect to Odoo to use the Account Explorer. "
                 "This tool lets you discover account codes and verify your ACCOUNT_MAP configuration.")
 
+    # ── NMBRS INTEGRATION ──────────────────────────
+    st.markdown("")
+    section_header("Nmbrs (Visma) Integration", "Employee, salary, and schedule data from Nmbrs HR/Payroll")
+
+    nmbrs_configured = is_nmbrs_configured()
+
+    if nmbrs_configured:
+        st.success("Nmbrs credentials detected.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Connection Test**")
+            if st.button("Test Nmbrs Connection", key="test_nmbrs"):
+                with st.spinner("Connecting to Nmbrs..."):
+                    status = check_nmbrs_connection()
+                    st.session_state['nmbrs_status'] = status
+
+            if 'nmbrs_status' in st.session_state:
+                ns = st.session_state['nmbrs_status']
+                if ns['connected']:
+                    st.success(f"Connected to **{ns['company_name']}** — "
+                               f"{ns['employee_count']} employees found")
+                else:
+                    st.error(f"Connection failed: {ns['error']}")
+
+        with col2:
+            st.markdown("**Department Explorer**")
+            st.caption("Discover Nmbrs departments and cost centers to configure "
+                       "the NMBRS_DEPARTMENT_TO_STORE mapping in config.py.")
+            if st.button("Fetch Departments", key="fetch_nmbrs_depts"):
+                with st.spinner("Fetching departments from Nmbrs..."):
+                    dept_df = fetch_nmbrs_departments()
+                    if not dept_df.empty:
+                        st.session_state['nmbrs_depts'] = dept_df
+                        st.success(f"Found {len(dept_df)} departments/cost centers")
+                    else:
+                        st.warning("No departments found. Check company ID.")
+
+            if 'nmbrs_depts' in st.session_state and not st.session_state['nmbrs_depts'].empty:
+                dept_data = st.session_state['nmbrs_depts']
+                for _, row in dept_data.iterrows():
+                    mapped = NMBRS_DEPARTMENT_TO_STORE.get(row['description'])
+                    status_badge = (badge(mapped, "good") if mapped
+                                    else badge("not mapped", "warning"))
+                    st.markdown(
+                        f"**{row['type'].title()}**: {row['description']} "
+                        f"(ID: {row['id']}) {status_badge}",
+                        unsafe_allow_html=True,
+                    )
+
+        # Employee overview
+        st.markdown("")
+        st.markdown("**Employee Overview**")
+        if st.button("Load Employee Data", key="load_nmbrs_employees"):
+            with st.spinner("Fetching employees from Nmbrs..."):
+                emp_df = fetch_nmbrs_employees()
+                if not emp_df.empty:
+                    st.session_state['nmbrs_employees'] = emp_df
+                    st.success(f"Loaded {len(emp_df)} employees")
+                else:
+                    st.warning("No employees found.")
+
+        if 'nmbrs_employees' in st.session_state and not st.session_state['nmbrs_employees'].empty:
+            emp = st.session_state['nmbrs_employees']
+
+            # Summary by store
+            store_summary = emp.groupby(['store_code', 'store_name']).agg(
+                headcount=('employee_id', 'count'),
+                total_fte=('fte_factor', 'sum'),
+            ).reset_index().sort_values('headcount', ascending=False)
+
+            st.dataframe(
+                store_summary, use_container_width=True, hide_index=True,
+                column_config={
+                    'store_code': 'Code',
+                    'store_name': 'Store',
+                    'headcount': st.column_config.NumberColumn('Headcount', format='%d'),
+                    'total_fte': st.column_config.NumberColumn('FTE', format='%.1f'),
+                },
+            )
+
+            with st.expander("Full employee list", expanded=False):
+                st.dataframe(
+                    emp[['name', 'department', 'store_name', 'job_title',
+                         'fte_factor', 'start_date']],
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        'name': 'Name',
+                        'department': 'Department',
+                        'store_name': 'Store',
+                        'job_title': 'Job Title',
+                        'fte_factor': st.column_config.NumberColumn('FTE', format='%.2f'),
+                        'start_date': 'Start Date',
+                    },
+                )
+
+        # Salary overview
+        st.markdown("")
+        st.markdown("**Salary Overview (aggregated)**")
+        if st.button("Load Salary Data", key="load_nmbrs_salary"):
+            with st.spinner("Fetching salary data from Nmbrs..."):
+                sal_df = fetch_nmbrs_salary_data()
+                if not sal_df.empty:
+                    st.session_state['nmbrs_salary'] = sal_df
+                    st.success(f"Loaded salary data for {len(sal_df)} employees")
+                else:
+                    st.warning("No salary data found.")
+
+        if 'nmbrs_salary' in st.session_state and not st.session_state['nmbrs_salary'].empty:
+            sal = st.session_state['nmbrs_salary']
+
+            # Aggregated by store (no individual salaries shown for privacy)
+            store_sal = sal.groupby(['store_code', 'store_name']).agg(
+                headcount=('employee_id', 'count'),
+                total_gross=('gross_salary_month', 'sum'),
+                total_employer_cost=('employer_cost_month', 'sum'),
+                avg_fte=('fte_factor', 'mean'),
+            ).reset_index().sort_values('total_employer_cost', ascending=False)
+
+            st.dataframe(
+                store_sal, use_container_width=True, hide_index=True,
+                column_config={
+                    'store_code': 'Code',
+                    'store_name': 'Store',
+                    'headcount': st.column_config.NumberColumn('Headcount', format='%d'),
+                    'total_gross': st.column_config.NumberColumn('Total Gross/mo', format='\u20ac%.0f'),
+                    'total_employer_cost': st.column_config.NumberColumn('Total Cost/mo', format='\u20ac%.0f'),
+                    'avg_fte': st.column_config.NumberColumn('Avg FTE', format='%.2f'),
+                },
+            )
+
+        # Current mapping
+        st.markdown("")
+        with st.expander("Current Department → Store Mapping", expanded=False):
+            mapping_rows = [{"Department/Cost Center": k, "Store Code": v}
+                            for k, v in NMBRS_DEPARTMENT_TO_STORE.items()]
+            if mapping_rows:
+                st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No mappings configured. Edit NMBRS_DEPARTMENT_TO_STORE in config.py.")
+
+    else:
+        st.info("Nmbrs not configured. Add NMBRS_USERNAME and NMBRS_TOKEN to "
+                ".streamlit/secrets.toml or Streamlit Cloud secrets to enable "
+                "HR/payroll data integration.")
+        st.markdown("""
+        **Setup steps:**
+        1. Get an API token from your Nmbrs admin (Settings → API Tokens)
+        2. Add to secrets: `NMBRS_USERNAME`, `NMBRS_TOKEN`, `NMBRS_COMPANY_ID`
+        3. Optionally add `NMBRS_DOMAIN` and `NMBRS_ENV`
+        4. Map departments to stores in `config.py` → `NMBRS_DEPARTMENT_TO_STORE`
+        """)
+
     # Configuration Reference
     st.markdown("")
     section_header("How to Configure", "Steps to connect real data")
     st.markdown("""
-    1. **Set Odoo credentials** in `.streamlit/secrets.toml` or Streamlit Cloud secrets
-    2. **Open this Settings tab** and click "Fetch Chart of Accounts"
-    3. **Identify your account codes** — find revenue accounts (usually 8xxxxx),
+    **Odoo (Financial Data):**
+    1. Set Odoo credentials in `.streamlit/secrets.toml` or Streamlit Cloud secrets
+    2. Open this Settings tab and click "Fetch Chart of Accounts"
+    3. Identify your account codes — find revenue accounts (usually 8xxxxx),
        COGS accounts (usually 4xxxxx), and operating expense accounts
-    4. **Edit `config.py`** — update the `ACCOUNT_MAP` dict with your real codes
-    5. **Restart the app** — sections with valid codes will show real Odoo data
+    4. Edit `config.py` — update the `ACCOUNT_MAP` dict with your real codes
+    5. Restart the app — sections with valid codes will show real Odoo data
 
     Each ACCOUNT_MAP entry needs:
     - `codes`: List of Odoo account code patterns (e.g. `["800000"]` or `["8%"]` for wildcards)
     - `label`: Display name in the dashboard
     - `sign`: `"credit"` for revenue, `"debit"` for expenses, `"abs"` for assets/CAPEX
+
+    **Nmbrs (HR/Payroll Data):**
+    1. Get an API token from Nmbrs (admin → Settings → API Tokens)
+    2. Add `NMBRS_USERNAME`, `NMBRS_TOKEN`, `NMBRS_COMPANY_ID` to secrets
+    3. Use the Department Explorer above to discover department names
+    4. Map departments to store codes in `config.py` → `NMBRS_DEPARTMENT_TO_STORE`
+    5. Restart — the Labor section will use real salary and headcount data
     """)
 
 
@@ -1579,17 +1764,28 @@ def main():
     odoo_sections = [k for k, v in data_sources.items() if v == 'odoo']
     demo_sections = [k for k, v in data_sources.items() if v == 'demo']
 
-    if not data['has_odoo']:
-        st.info("Running in demo mode — no Odoo credentials configured. "
+    nmbrs_sections = [k for k, v in data_sources.items() if v == 'nmbrs']
+
+    if not data['has_odoo'] and not nmbrs_sections:
+        st.info("Running in demo mode — no Odoo/Nmbrs credentials configured. "
                 "All data shown is illustrative. See the Settings tab to connect.")
-    elif demo_sections:
-        odoo_text = ', '.join(s.upper() for s in odoo_sections) if odoo_sections else 'none'
-        demo_text = ', '.join(s.upper() for s in demo_sections)
-        st.info(f"Connected to Odoo. Live data: **{odoo_text}**. "
-                f"Demo fallback: **{demo_text}**. "
-                f"Configure account codes in Settings tab to enable more sections.")
     else:
-        st.success("All data sourced from Odoo.")
+        live_parts = []
+        if odoo_sections:
+            live_parts.append(f"Odoo: **{', '.join(s.upper() for s in odoo_sections)}**")
+        if nmbrs_sections:
+            live_parts.append(f"Nmbrs: **{', '.join(s.upper() for s in nmbrs_sections)}**")
+        if demo_sections:
+            demo_text = ', '.join(s.upper() for s in demo_sections)
+            if live_parts:
+                st.info(f"Live data from {'; '.join(live_parts)}. "
+                        f"Demo fallback: **{demo_text}**. "
+                        f"Configure more in the Settings tab.")
+            else:
+                st.info(f"Demo fallback: **{demo_text}**. "
+                        f"Configure data sources in the Settings tab.")
+        else:
+            st.success(f"All data sourced from live systems: {'; '.join(live_parts)}.")
 
     # Tabs
     tabs = st.tabs([
