@@ -15,6 +15,7 @@ from datetime import datetime, date
 import json
 import os
 import base64
+import streamlit.components.v1 as components
 
 # Page config
 st.set_page_config(
@@ -407,10 +408,23 @@ def render_invoice_popup(db, uid, password, move_id, move_name):
             mime='application/pdf',
             key=f"pdf_dl_{move_id}"
         )
-        # Embed PDF viewer
+        # Embed PDF viewer using blob URL (data: URIs are blocked by most browsers)
         b64 = pdf_data['datas']
-        pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600" type="application/pdf"></iframe>'
-        st.markdown(pdf_display, unsafe_allow_html=True)
+        pdf_html = f"""
+        <iframe id="pdfViewer" width="100%" height="580" style="border:none;"></iframe>
+        <script>
+            const b64 = "{b64}";
+            const byteChars = atob(b64);
+            const byteNums = new Uint8Array(byteChars.length);
+            for (let i = 0; i < byteChars.length; i++) {{
+                byteNums[i] = byteChars.charCodeAt(i);
+            }}
+            const blob = new Blob([byteNums], {{type: 'application/pdf'}});
+            const url = URL.createObjectURL(blob);
+            document.getElementById('pdfViewer').src = url;
+        </script>
+        """
+        components.html(pdf_html, height=600)
 
 
 def main():
