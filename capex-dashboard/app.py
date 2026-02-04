@@ -103,7 +103,7 @@ def get_odoo_connection():
     """Initialize Odoo connection."""
     url = st.secrets.get("ODOO_URL", os.environ.get("ODOO_URL", "https://wakuli.odoo.com"))
     db = st.secrets.get("ODOO_DB", os.environ.get("ODOO_DB", "wakuli-production-10206791"))
-    username = st.secrets.get("ODOO_USER", os.environ.get("ODOO_USER", ""))
+    username = st.secrets.get("ODOO_USER", os.environ.get("ODOO_USER", "accounting@fidfinance.nl"))
     password = st.secrets.get("ODOO_PASSWORD", os.environ.get("ODOO_PASSWORD", ""))
     
     if not username or not password:
