@@ -206,9 +206,17 @@ def main():
     with st.sidebar:
         st.header("⚙️ Settings")
         
-        # Year selection
+        # Year selection (multi-year)
         current_year = datetime.now().year
-        selected_year = st.selectbox("📅 Year", options=[current_year, current_year - 1, current_year + 1], index=0)
+        year_options = list(range(current_year - 3, current_year + 2))
+        selected_years = st.multiselect(
+            "📅 Year(s)",
+            options=year_options,
+            default=[current_year]
+        )
+        if not selected_years:
+            selected_years = [current_year]
+        selected_years = sorted(selected_years)
         
         # Account selection
         st.subheader("📊 Accounts to Track")
@@ -238,25 +246,36 @@ def main():
     if connection[0] is None:
         st.warning("⚠️ Odoo credentials not configured. Using demo data.")
         st.info("To connect to Odoo, set these secrets in Streamlit Cloud or environment variables:\n- ODOO_URL\n- ODOO_DB\n- ODOO_USER\n- ODOO_PASSWORD")
-        
-        # Demo data
-        demo_data = {
-            'date': ['2025-01-15', '2025-02-20', '2025-03-10', '2025-04-05', '2025-05-12', '2025-06-08'],
-            'month': ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06'],
-            'amount': [15000, 8500, 22000, 5000, 18000, 12000],
-            'description': ['Renovation', 'Equipment', 'Construction', 'Repairs', 'Renovation', 'Equipment'],
-            'account': ['037000', '037000', '037000', '037000', '037000', '037000'],
-            'store_code': ['HAS', 'VIS', 'THER', 'PIET', 'STOEL', 'MEENT'],
-            'store_name': ['Haarlemmerstraat', 'Visstraat', 'Theresiastraat', 'Piet Heinstraat', 'Stoeldraaierstraat', 'Meent']
-        }
-        actuals_df = pd.DataFrame(demo_data)
+
+        # Demo data for each selected year
+        demo_frames = []
+        for yr in selected_years:
+            demo_data = {
+                'date': [f'{yr}-01-15', f'{yr}-02-20', f'{yr}-03-10', f'{yr}-04-05', f'{yr}-05-12', f'{yr}-06-08'],
+                'month': [f'{yr}-01', f'{yr}-02', f'{yr}-03', f'{yr}-04', f'{yr}-05', f'{yr}-06'],
+                'amount': [15000, 8500, 22000, 5000, 18000, 12000],
+                'description': ['Renovation', 'Equipment', 'Construction', 'Repairs', 'Renovation', 'Equipment'],
+                'account': ['037000', '037000', '037000', '037000', '037000', '037000'],
+                'store_code': ['HAS', 'VIS', 'THER', 'PIET', 'STOEL', 'MEENT'],
+                'store_name': ['Haarlemmerstraat', 'Visstraat', 'Theresiastraat', 'Piet Heinstraat', 'Stoeldraaierstraat', 'Meent'],
+                'year': [yr] * 6
+            }
+            demo_frames.append(pd.DataFrame(demo_data))
+        actuals_df = pd.concat(demo_frames, ignore_index=True)
     else:
         url, db, uid, models, password = connection
-        actuals_df = fetch_capex_actuals(models, db, uid, password, selected_accounts, selected_year)
+        # Fetch data for each selected year and combine
+        year_frames = []
+        for yr in selected_years:
+            yr_df = fetch_capex_actuals(models, db, uid, password, selected_accounts, yr)
+            if not yr_df.empty:
+                yr_df['year'] = yr
+                year_frames.append(yr_df)
+        actuals_df = pd.concat(year_frames, ignore_index=True) if year_frames else pd.DataFrame()
     
     # Load budgets
     budgets = load_budgets()
-    budget_key = f"{selected_year}_{'-'.join(selected_accounts)}"
+    budget_keys = [f"{yr}_{'-'.join(selected_accounts)}" for yr in selected_years]
     
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💰 Budget Management", "🗺️ Store Map", "📋 Detailed Data"])
@@ -273,7 +292,11 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
             
             total_actual = filtered_df['amount'].sum()
-            total_budget = sum(budgets.get(budget_key, {}).get(store, 0) for store in store_filter)
+            total_budget = sum(
+                budgets.get(bk, {}).get(store, 0)
+                for bk in budget_keys
+                for store in store_filter
+            )
             variance = total_budget - total_actual
             variance_pct = (variance / total_budget * 100) if total_budget > 0 else 0
             
@@ -323,7 +346,7 @@ def main():
             for store_code in store_filter:
                 if store_code in STORE_LOCATIONS:
                     actual = filtered_df[filtered_df['store_code'] == store_code]['amount'].sum()
-                    budget = budgets.get(budget_key, {}).get(store_code, 0)
+                    budget = sum(budgets.get(bk, {}).get(store_code, 0) for bk in budget_keys)
                     comparison_data.append({
                         'Store': STORE_LOCATIONS[store_code]['name'],
                         'Code': store_code,
@@ -348,18 +371,27 @@ def main():
     # TAB 2: BUDGET MANAGEMENT
     with tab2:
         st.subheader("💰 Set Budgets per Store")
-        st.info(f"Setting budgets for **{selected_year}** | Accounts: {', '.join(selected_accounts)}")
-        
+
+        # Year selector for budget editing (pick one year at a time)
+        budget_year = st.selectbox(
+            "Select year to edit budget",
+            options=selected_years,
+            index=0,
+            key="budget_year_select"
+        )
+        budget_key = f"{budget_year}_{'-'.join(selected_accounts)}"
+        st.info(f"Setting budgets for **{budget_year}** | Accounts: {', '.join(selected_accounts)}")
+
         # Initialize budget dict for this key
         if budget_key not in budgets:
             budgets[budget_key] = {}
-        
+
         # Budget input form
         col1, col2 = st.columns(2)
-        
+
         stores_list = [(code, info) for code, info in STORE_LOCATIONS.items()]
         half = len(stores_list) // 2
-        
+
         with col1:
             for code, info in stores_list[:half]:
                 current_budget = budgets[budget_key].get(code, 0)
@@ -368,10 +400,10 @@ def main():
                     min_value=0,
                     value=int(current_budget),
                     step=1000,
-                    key=f"budget_{code}"
+                    key=f"budget_{budget_year}_{code}"
                 )
                 budgets[budget_key][code] = new_budget
-        
+
         with col2:
             for code, info in stores_list[half:]:
                 current_budget = budgets[budget_key].get(code, 0)
@@ -380,36 +412,36 @@ def main():
                     min_value=0,
                     value=int(current_budget),
                     step=1000,
-                    key=f"budget_{code}"
+                    key=f"budget_{budget_year}_{code}"
                 )
                 budgets[budget_key][code] = new_budget
-        
+
         st.divider()
-        
+
         # Quick budget templates
         st.subheader("📋 Quick Templates")
         col1, col2, col3 = st.columns(3)
-        
+
         with col1:
             if st.button("🆕 New Store Template (€50k)", use_container_width=True):
                 for code in STORE_LOCATIONS.keys():
                     budgets[budget_key][code] = 50000
-                st.success("Applied €50k budget to all stores")
+                st.success(f"Applied €50k budget to all stores for {budget_year}")
                 st.rerun()
-        
+
         with col2:
             if st.button("🔄 Renovation Template (€25k)", use_container_width=True):
                 for code in STORE_LOCATIONS.keys():
                     budgets[budget_key][code] = 25000
-                st.success("Applied €25k budget to all stores")
+                st.success(f"Applied €25k budget to all stores for {budget_year}")
                 st.rerun()
-        
+
         with col3:
             if st.button("🗑️ Clear All Budgets", use_container_width=True):
                 budgets[budget_key] = {}
-                st.warning("All budgets cleared")
+                st.warning(f"All budgets cleared for {budget_year}")
                 st.rerun()
-        
+
         # Save button
         st.divider()
         if st.button("💾 Save Budgets", type="primary", use_container_width=True):
@@ -426,7 +458,7 @@ def main():
         for code, info in STORE_LOCATIONS.items():
             if code != "OOH" and 'lat' in info:
                 actual = actuals_df[actuals_df['store_code'] == code]['amount'].sum() if not actuals_df.empty else 0
-                budget = budgets.get(budget_key, {}).get(code, 0)
+                budget = sum(budgets.get(bk, {}).get(code, 0) for bk in budget_keys)
                 map_data.append({
                     'lat': info['lat'],
                     'lon': info['lon'],
@@ -512,7 +544,7 @@ def main():
             st.download_button(
                 label="📥 Download CSV",
                 data=csv,
-                file_name=f"wakuli_capex_{selected_year}.csv",
+                file_name=f"wakuli_capex_{'_'.join(str(y) for y in selected_years)}.csv",
                 mime="text/csv"
             )
 
