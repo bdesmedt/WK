@@ -461,12 +461,24 @@ ODOO_MODULES = {
 #   NMBRS_TOKEN    = "your-api-token"
 #   NMBRS_DOMAIN   = "your-domain"     # optional, for domain-based auth
 #   NMBRS_ENV      = "production"       # or "sandbox" for testing
-#   NMBRS_COMPANY_ID = "12345"          # your company ID in Nmbrs
 #
-# To find your company ID, use the Nmbrs diagnostic in the Settings tab.
+# To find your company IDs, use the Nmbrs diagnostic in the Settings tab.
+#
+# MULTI-COMPANY SUPPORT
+# ---------------------
+# Wakuli has multiple legal entities in Nmbrs. List them all under
+# "companies" below. Each entry maps a Nmbrs company ID to a human-
+# readable label shown in the dashboard. Employee data from all listed
+# companies is merged into one unified labor dataset.
 NMBRS_CONFIG = {
     "enabled": True,         # Set to False to disable Nmbrs integration
-    "company_id": 0,         # Override in secrets as NMBRS_COMPANY_ID
+    "companies": {
+        # Nmbrs company ID → display label
+        # Fill these in after running "List All Companies" in the Settings tab.
+        # Example:
+        # 12345: "Wakuli Retail BV",
+        # 67890: "Wakuli Holding BV",
+    },
     "full_time_hours": 40,   # Weekly hours for FTE=1.0 (NL standard: 40)
     "employer_burden_pct": 0.30,  # Social charges, pension, insurance on top of gross
 }

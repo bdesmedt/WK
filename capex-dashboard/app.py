@@ -1568,53 +1568,120 @@ def render_settings_tab(data, selected_years):
     if nmbrs_configured:
         st.success("Nmbrs credentials detected.")
 
+        # ── Company Discovery & Connection Test ──
+        st.markdown("**Company Discovery**")
+        st.caption("Lists all Nmbrs companies accessible with your credentials. "
+                   "Copy the IDs into NMBRS_CONFIG['companies'] in config.py.")
+        if st.button("List All Companies & Test Connection", key="test_nmbrs"):
+            with st.spinner("Connecting to Nmbrs..."):
+                status = check_nmbrs_connection()
+                st.session_state['nmbrs_status'] = status
+
+        if 'nmbrs_status' in st.session_state:
+            ns = st.session_state['nmbrs_status']
+            if ns['connected']:
+                all_co = ns.get('all_companies', [])
+                configured_co = ns.get('companies', [])
+                st.success(f"Connected — {len(all_co)} companies accessible, "
+                           f"{len(configured_co)} configured, "
+                           f"{ns['total_employees']} employees total")
+
+                # Show ALL accessible companies with config status
+                co_rows = []
+                for co in all_co:
+                    co_rows.append({
+                        "ID": co["id"],
+                        "Company": co["name"],
+                        "Number": co.get("number", ""),
+                        "Employees": co["employee_count"],
+                        "Status": "Configured" if co["configured"] else "Not configured",
+                    })
+                if co_rows:
+                    st.dataframe(
+                        pd.DataFrame(co_rows), use_container_width=True, hide_index=True,
+                        column_config={
+                            'ID': st.column_config.NumberColumn('Nmbrs ID', format='%d'),
+                            'Company': 'Company Name',
+                            'Number': 'Company #',
+                            'Employees': st.column_config.NumberColumn('Employees', format='%d'),
+                            'Status': 'Config Status',
+                        },
+                    )
+
+                    unconfigured = [co for co in all_co if not co["configured"]]
+                    if unconfigured:
+                        st.info(
+                            "To add a company, copy its ID into config.py:\n\n"
+                            "```python\n"
+                            "NMBRS_CONFIG = {\n"
+                            '    "companies": {\n'
+                            + "".join(f'        {co["id"]}: "{co["name"]}",\n' for co in all_co)
+                            + "    },\n"
+                            "    ...\n"
+                            "}\n"
+                            "```"
+                        )
+            else:
+                st.error(f"Connection failed: {ns['error']}")
+
+        # ── Configured companies summary ──
+        configured_companies = NMBRS_CONFIG.get("companies", {})
+        if configured_companies:
+            st.markdown("")
+            st.markdown(f"**Configured companies** ({len(configured_companies)}):")
+            for cid, label in configured_companies.items():
+                st.markdown(f"- {badge(str(cid), 'good')} {label}", unsafe_allow_html=True)
+        else:
+            st.warning("No companies configured yet. Click 'List All Companies' above to "
+                       "discover your Nmbrs company IDs.")
+
+        # ── Department Explorer ──
+        st.markdown("")
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("**Connection Test**")
-            if st.button("Test Nmbrs Connection", key="test_nmbrs"):
-                with st.spinner("Connecting to Nmbrs..."):
-                    status = check_nmbrs_connection()
-                    st.session_state['nmbrs_status'] = status
-
-            if 'nmbrs_status' in st.session_state:
-                ns = st.session_state['nmbrs_status']
-                if ns['connected']:
-                    st.success(f"Connected to **{ns['company_name']}** — "
-                               f"{ns['employee_count']} employees found")
-                else:
-                    st.error(f"Connection failed: {ns['error']}")
-
-        with col2:
             st.markdown("**Department Explorer**")
-            st.caption("Discover Nmbrs departments and cost centers to configure "
-                       "the NMBRS_DEPARTMENT_TO_STORE mapping in config.py.")
+            st.caption("Discover Nmbrs departments and cost centers across all "
+                       "configured companies for the NMBRS_DEPARTMENT_TO_STORE mapping.")
             if st.button("Fetch Departments", key="fetch_nmbrs_depts"):
-                with st.spinner("Fetching departments from Nmbrs..."):
+                with st.spinner("Fetching departments from all companies..."):
                     dept_df = fetch_nmbrs_departments()
                     if not dept_df.empty:
                         st.session_state['nmbrs_depts'] = dept_df
                         st.success(f"Found {len(dept_df)} departments/cost centers")
                     else:
-                        st.warning("No departments found. Check company ID.")
+                        st.warning("No departments found. Check company IDs.")
 
             if 'nmbrs_depts' in st.session_state and not st.session_state['nmbrs_depts'].empty:
                 dept_data = st.session_state['nmbrs_depts']
-                for _, row in dept_data.iterrows():
-                    mapped = NMBRS_DEPARTMENT_TO_STORE.get(row['description'])
-                    status_badge = (badge(mapped, "good") if mapped
-                                    else badge("not mapped", "warning"))
-                    st.markdown(
-                        f"**{row['type'].title()}**: {row['description']} "
-                        f"(ID: {row['id']}) {status_badge}",
-                        unsafe_allow_html=True,
-                    )
+                # Group by company
+                for company_label in dept_data['nmbrs_company'].unique():
+                    st.markdown(f"*{company_label}:*")
+                    company_depts = dept_data[dept_data['nmbrs_company'] == company_label]
+                    for _, row in company_depts.iterrows():
+                        mapped = NMBRS_DEPARTMENT_TO_STORE.get(row['description'])
+                        status_badge = (badge(mapped, "good") if mapped
+                                        else badge("not mapped", "warning"))
+                        st.markdown(
+                            f"&nbsp;&nbsp;**{row['type'].title()}**: {row['description']} "
+                            f"(ID: {row['id']}) {status_badge}",
+                            unsafe_allow_html=True,
+                        )
 
-        # Employee overview
+        with col2:
+            st.markdown("**Current Department → Store Mapping**")
+            mapping_rows = [{"Department/Cost Center": k, "Store Code": v}
+                            for k, v in NMBRS_DEPARTMENT_TO_STORE.items()]
+            if mapping_rows:
+                st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No mappings configured. Edit NMBRS_DEPARTMENT_TO_STORE in config.py.")
+
+        # ── Employee overview ──
         st.markdown("")
-        st.markdown("**Employee Overview**")
+        st.markdown("**Employee Overview** (all configured companies merged)")
         if st.button("Load Employee Data", key="load_nmbrs_employees"):
-            with st.spinner("Fetching employees from Nmbrs..."):
+            with st.spinner("Fetching employees from all companies..."):
                 emp_df = fetch_nmbrs_employees()
                 if not emp_df.empty:
                     st.session_state['nmbrs_employees'] = emp_df
@@ -1625,10 +1692,20 @@ def render_settings_tab(data, selected_years):
         if 'nmbrs_employees' in st.session_state and not st.session_state['nmbrs_employees'].empty:
             emp = st.session_state['nmbrs_employees']
 
-            # Summary by store
+            # Summary by company
+            company_summary = emp.groupby('nmbrs_company').agg(
+                headcount=('employee_id', 'count'),
+                total_fte=('fte_factor', 'sum'),
+            ).reset_index()
+            for _, row in company_summary.iterrows():
+                st.markdown(f"**{row['nmbrs_company']}**: {int(row['headcount'])} employees, "
+                            f"{row['total_fte']:.1f} FTE")
+
+            # Summary by store (merged across companies)
             store_summary = emp.groupby(['store_code', 'store_name']).agg(
                 headcount=('employee_id', 'count'),
                 total_fte=('fte_factor', 'sum'),
+                companies=('nmbrs_company', lambda x: ', '.join(sorted(x.unique()))),
             ).reset_index().sort_values('headcount', ascending=False)
 
             st.dataframe(
@@ -1638,13 +1715,14 @@ def render_settings_tab(data, selected_years):
                     'store_name': 'Store',
                     'headcount': st.column_config.NumberColumn('Headcount', format='%d'),
                     'total_fte': st.column_config.NumberColumn('FTE', format='%.1f'),
+                    'companies': 'From Companies',
                 },
             )
 
             with st.expander("Full employee list", expanded=False):
                 st.dataframe(
                     emp[['name', 'department', 'store_name', 'job_title',
-                         'fte_factor', 'start_date']],
+                         'fte_factor', 'start_date', 'nmbrs_company']],
                     use_container_width=True, hide_index=True,
                     column_config={
                         'name': 'Name',
@@ -1653,14 +1731,15 @@ def render_settings_tab(data, selected_years):
                         'job_title': 'Job Title',
                         'fte_factor': st.column_config.NumberColumn('FTE', format='%.2f'),
                         'start_date': 'Start Date',
+                        'nmbrs_company': 'Company',
                     },
                 )
 
-        # Salary overview
+        # ── Salary overview ──
         st.markdown("")
-        st.markdown("**Salary Overview (aggregated)**")
+        st.markdown("**Salary Overview** (aggregated, all companies)")
         if st.button("Load Salary Data", key="load_nmbrs_salary"):
-            with st.spinner("Fetching salary data from Nmbrs..."):
+            with st.spinner("Fetching salary data from all companies..."):
                 sal_df = fetch_nmbrs_salary_data()
                 if not sal_df.empty:
                     st.session_state['nmbrs_salary'] = sal_df
@@ -1670,6 +1749,15 @@ def render_settings_tab(data, selected_years):
 
         if 'nmbrs_salary' in st.session_state and not st.session_state['nmbrs_salary'].empty:
             sal = st.session_state['nmbrs_salary']
+
+            # Per-company totals
+            company_sal = sal.groupby('nmbrs_company').agg(
+                headcount=('employee_id', 'count'),
+                total_employer_cost=('employer_cost_month', 'sum'),
+            ).reset_index()
+            for _, row in company_sal.iterrows():
+                st.markdown(f"**{row['nmbrs_company']}**: {int(row['headcount'])} employees, "
+                            f"\u20ac{row['total_employer_cost']:,.0f}/mo total employer cost")
 
             # Aggregated by store (no individual salaries shown for privacy)
             store_sal = sal.groupby(['store_code', 'store_name']).agg(
@@ -1691,16 +1779,6 @@ def render_settings_tab(data, selected_years):
                 },
             )
 
-        # Current mapping
-        st.markdown("")
-        with st.expander("Current Department → Store Mapping", expanded=False):
-            mapping_rows = [{"Department/Cost Center": k, "Store Code": v}
-                            for k, v in NMBRS_DEPARTMENT_TO_STORE.items()]
-            if mapping_rows:
-                st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
-            else:
-                st.info("No mappings configured. Edit NMBRS_DEPARTMENT_TO_STORE in config.py.")
-
     else:
         st.info("Nmbrs not configured. Add NMBRS_USERNAME and NMBRS_TOKEN to "
                 ".streamlit/secrets.toml or Streamlit Cloud secrets to enable "
@@ -1708,9 +1786,11 @@ def render_settings_tab(data, selected_years):
         st.markdown("""
         **Setup steps:**
         1. Get an API token from your Nmbrs admin (Settings → API Tokens)
-        2. Add to secrets: `NMBRS_USERNAME`, `NMBRS_TOKEN`, `NMBRS_COMPANY_ID`
+        2. Add to secrets: `NMBRS_USERNAME`, `NMBRS_TOKEN`
         3. Optionally add `NMBRS_DOMAIN` and `NMBRS_ENV`
-        4. Map departments to stores in `config.py` → `NMBRS_DEPARTMENT_TO_STORE`
+        4. Click "List All Companies" to discover your company IDs
+        5. Add company IDs to `NMBRS_CONFIG["companies"]` in config.py
+        6. Map departments to stores in `NMBRS_DEPARTMENT_TO_STORE`
         """)
 
     # Configuration Reference
@@ -1732,10 +1812,12 @@ def render_settings_tab(data, selected_years):
 
     **Nmbrs (HR/Payroll Data):**
     1. Get an API token from Nmbrs (admin → Settings → API Tokens)
-    2. Add `NMBRS_USERNAME`, `NMBRS_TOKEN`, `NMBRS_COMPANY_ID` to secrets
-    3. Use the Department Explorer above to discover department names
-    4. Map departments to store codes in `config.py` → `NMBRS_DEPARTMENT_TO_STORE`
-    5. Restart — the Labor section will use real salary and headcount data
+    2. Add `NMBRS_USERNAME` and `NMBRS_TOKEN` to secrets
+    3. Click "List All Companies" in Settings to discover company IDs
+    4. Add both company IDs to `NMBRS_CONFIG["companies"]` in config.py
+    5. Use the Department Explorer to discover department names
+    6. Map departments to store codes in `NMBRS_DEPARTMENT_TO_STORE`
+    7. Restart — the Labor section will merge data from both companies
     """)
 
 
