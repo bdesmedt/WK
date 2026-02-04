@@ -4,13 +4,7 @@ Wakuli Retail Analytics - Configuration
 Central configuration for store data, account mappings, brand constants,
 and all dashboard settings.
 
-HOW TO CONFIGURE FOR YOUR ODOO INSTANCE
------------------------------------------
-1. Run the "Account Explorer" diagnostic (Settings tab in dashboard sidebar)
-   to discover your actual Odoo chart of accounts.
-2. Update ACCOUNT_MAP below with real account code patterns.
-3. Each entry uses Odoo's =like operator: '8%' matches 800000, 801000, etc.
-   Use exact codes like '800000' for precision, or prefixes like '8%' for ranges.
+UPDATED: Feb 2026 - Corrected account codes for Wakuli Retail Holding (Odoo)
 """
 
 # ──────────────────────────────────────────────
@@ -88,176 +82,392 @@ ODOO_ID_TO_STORE = {v: k for k, v in STORE_ODOO_IDS.items()}
 # Wakuli Retail Holding company ID in Odoo
 RETAIL_HOLDING_ID = 2
 
-
 # ──────────────────────────────────────────────
-# ACCOUNT MAP — THE CORE CONFIGURATION
+# ACCOUNT MAP — WAKULI RETAIL HOLDING (ACTUAL CODES)
 # ──────────────────────────────────────────────
-# This is the single source of truth that maps Odoo account codes to
-# dashboard categories. Edit this to match your actual chart of accounts.
+# Updated Feb 2026 with real Odoo account codes
 #
 # Structure:
 #   section -> category_key -> {
-#       "codes": list of Odoo account code patterns (uses =like, so "8%" matches 800000)
+#       "codes": list of Odoo account code patterns (uses =like, so "8%" matches all 8xxxxx)
 #       "label": Display name in the dashboard
-#       "sign":  How to interpret the balance field:
-#                "credit"  = revenue (positive amount = credit balance)
-#                "debit"   = expense (positive amount = debit balance)
-#                "abs"     = use absolute value (for CAPEX/asset entries)
-#       "group": Optional grouping for roll-ups (e.g. "cogs", "opex", "fixed")
+#       "sign":  "credit" = revenue, "debit" = expense, "abs" = absolute
+#       "group": Optional grouping
 #   }
-#
-# To discover your actual account codes, use the Account Explorer in the
-# dashboard sidebar, or query Odoo:
-#   Accounting > Configuration > Chart of Accounts
 
 ACCOUNT_MAP = {
     # ── REVENUE ──────────────────────────────────
-    # All revenue accounts. The dashboard sums these for total revenue,
-    # and breaks down by category for the Revenue Analytics tab.
     "revenue": {
-        "coffee_sales": {
-            "codes": ["800000"],
-            "label": "Coffee Sales",
+        "coffee_beverages": {
+            "codes": ["800601", "800611", "800621"],
+            "label": "Omzet Dranken (Beverages)",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "coffee_retail": {
+            "codes": ["800610"],
+            "label": "Omzet Retail (Koffie/Bundel)",
             "sign": "credit",
             "group": "revenue",
         },
         "food_sales": {
-            "codes": ["800100"],
-            "label": "Food Sales",
+            "codes": ["800620"],
+            "label": "Omzet Eten (Food)",
             "sign": "credit",
             "group": "revenue",
         },
-        "merchandise_sales": {
-            "codes": ["800200"],
-            "label": "Merchandise Sales",
+        "consumables": {
+            "codes": ["800630"],
+            "label": "Omzet Verbruiksartikelen",
             "sign": "credit",
             "group": "revenue",
         },
-        "subscription_revenue": {
-            "codes": ["800300"],
-            "label": "Subscription Revenue",
+        "retail_noncoffee": {
+            "codes": ["800640"],
+            "label": "Omzet Retail (Non-Coffee)",
             "sign": "credit",
             "group": "revenue",
         },
-        "delivery_revenue": {
-            "codes": ["800400"],
-            "label": "Delivery Revenue",
+        "merchandise": {
+            "codes": ["800690"],
+            "label": "Omzet Merchandise",
             "sign": "credit",
             "group": "revenue",
         },
-        # CATCH-ALL: Uncomment to pick up any revenue account by prefix:
-        # "other_revenue": {
-        #     "codes": ["8%"],
-        #     "label": "Other Revenue",
-        #     "sign": "credit",
-        #     "group": "revenue",
-        # },
+        "workshops": {
+            "codes": ["800660"],
+            "label": "Omzet Workshops",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "equipment_sales": {
+            "codes": ["800670"],
+            "label": "Omzet Uitrusting",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "ingredients": {
+            "codes": ["800600"],
+            "label": "Omzet Ingredienten",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "discounts": {
+            "codes": ["800650"],
+            "label": "Omzet Discounts",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "deposit": {
+            "codes": ["800680"],
+            "label": "Omzet Statiegeld",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "other_revenue": {
+            "codes": ["806500", "809000"],
+            "label": "Overige Opbrengsten",
+            "sign": "credit",
+            "group": "revenue",
+        },
     },
 
     # ── COST OF GOODS SOLD ───────────────────────
-    # Direct costs tied to products sold.
     "cogs": {
         "cogs_coffee": {
-            "codes": ["400000"],
-            "label": "COGS - Coffee Beans",
+            "codes": ["700100"],
+            "label": "COGS Coffee",
             "sign": "debit",
             "group": "cogs",
         },
-        "cogs_food": {
-            "codes": ["400100"],
-            "label": "COGS - Food & Bakery",
+        "cogs_roasting": {
+            "codes": ["700101"],
+            "label": "COGS Roasting",
             "sign": "debit",
             "group": "cogs",
         },
-        "cogs_merchandise": {
-            "codes": ["400200"],
-            "label": "COGS - Merchandise",
+        "cogs_fb_ingredients": {
+            "codes": ["700106"],
+            "label": "COGS F&B Ingredients",
             "sign": "debit",
             "group": "cogs",
         },
-        "cogs_packaging": {
-            "codes": ["400300"],
-            "label": "COGS - Packaging",
+        "cogs_cleaning": {
+            "codes": ["700109"],
+            "label": "COGS Cleaning & Inputs",
             "sign": "debit",
             "group": "cogs",
         },
-        # CATCH-ALL: Uncomment to pick up any COGS account by prefix:
-        # "cogs_other": {
-        #     "codes": ["40%"],
-        #     "label": "COGS - Other",
-        #     "sign": "debit",
-        #     "group": "cogs",
-        # },
+        "cogs_transaction": {
+            "codes": ["700134"],
+            "label": "COGS Transaction Costs (Lightspeed)",
+            "sign": "debit",
+            "group": "cogs",
+        },
+        "cogs_discount": {
+            "codes": ["706500"],
+            "label": "Betalingskorting",
+            "sign": "debit",
+            "group": "cogs",
+        },
+        "cogs_waste": {
+            "codes": ["709111"],
+            "label": "Afgekeurde Voorraad (Waste)",
+            "sign": "debit",
+            "group": "cogs",
+        },
     },
 
     # ── OPERATING EXPENSES ───────────────────────
-    # Non-COGS operating costs. Each maps to a cost_category used by the
-    # KPI engine to calculate labor%, rent%, etc.
     "opex": {
-        "labor": {
-            "codes": ["410000"],
-            "label": "Labor Costs",
+        # LABOR COSTS (400xxx - 409xxx)
+        "labor_gross": {
+            "codes": ["400100", "400200", "400300", "400400", "400500", "400600"],
+            "label": "Bruto Loonkosten",
             "sign": "debit",
-            "group": "opex",
+            "group": "labor",
             "is_fixed": False,
         },
-        "rent": {
-            "codes": ["420000"],
-            "label": "Rent & Occupancy",
+        "labor_employer": {
+            "codes": ["401000", "401100", "401200", "401500", "401600", "401700", "401800", "401900"],
+            "label": "Werkgeverslasten",
             "sign": "debit",
-            "group": "opex",
+            "group": "labor",
+            "is_fixed": False,
+        },
+        "labor_external": {
+            "codes": ["402000", "402100", "402200", "402400", "402900"],
+            "label": "Ingeleend Personeel",
+            "sign": "debit",
+            "group": "labor",
+            "is_fixed": False,
+        },
+        "labor_other": {
+            "codes": ["403000", "403500", "404001", "404100", "404200", "404300", "404400", "404500", "409000"],
+            "label": "Overige Personeelskosten",
+            "sign": "debit",
+            "group": "labor",
+            "is_fixed": False,
+        },
+        "labor_bar": {
+            "codes": ["408000", "408010", "408040", "408050"],
+            "label": "Loonkosten Bar Personnel",
+            "sign": "debit",
+            "group": "labor",
+            "is_fixed": False,
+        },
+
+        # OCCUPANCY / RENT (411xxx - 419xxx)
+        "rent": {
+            "codes": ["411001"],
+            "label": "Huur Onroerend Goed",
+            "sign": "debit",
+            "group": "occupancy",
+            "is_fixed": True,
+        },
+        "maintenance_property": {
+            "codes": ["411101", "411201", "411301"],
+            "label": "Onderhoud Onroerend Goed",
+            "sign": "debit",
+            "group": "occupancy",
+            "is_fixed": True,
+        },
+        "property_tax": {
+            "codes": ["412001"],
+            "label": "Belastingen Onroerend Goed",
+            "sign": "debit",
+            "group": "occupancy",
             "is_fixed": True,
         },
         "utilities": {
-            "codes": ["430000"],
-            "label": "Utilities",
+            "codes": ["413001"],
+            "label": "Energiekosten",
             "sign": "debit",
-            "group": "opex",
+            "group": "occupancy",
             "is_fixed": True,
+        },
+        "cleaning": {
+            "codes": ["414001"],
+            "label": "Schoonmaakkosten",
+            "sign": "debit",
+            "group": "occupancy",
+            "is_fixed": True,
+        },
+        "insurance_property": {
+            "codes": ["415001"],
+            "label": "Assurantie Onroerend Goed",
+            "sign": "debit",
+            "group": "occupancy",
+            "is_fixed": True,
+        },
+        "other_occupancy": {
+            "codes": ["419001", "419002"],
+            "label": "Overige Huisvestingskosten",
+            "sign": "debit",
+            "group": "occupancy",
+            "is_fixed": True,
+        },
+
+        # EQUIPMENT (420xxx - 429xxx)
+        "equipment_lease": {
+            "codes": ["420100", "420200", "421000", "421100"],
+            "label": "Huur/Lease Machines & Inventaris",
+            "sign": "debit",
+            "group": "equipment",
+            "is_fixed": True,
+        },
+        "equipment_maintenance": {
+            "codes": ["422000", "423000", "424000"],
+            "label": "Onderhoud Machines & Inventaris",
+            "sign": "debit",
+            "group": "equipment",
+            "is_fixed": False,
+        },
+        "equipment_other": {
+            "codes": ["425001", "426001", "427001", "428001", "429001"],
+            "label": "Overige Bedrijfskosten",
+            "sign": "debit",
+            "group": "equipment",
+            "is_fixed": False,
+        },
+
+        # OFFICE / ADMIN (430xxx - 439xxx)
+        "office_supplies": {
+            "codes": ["430501", "431001"],
+            "label": "Kantoorbenodigdheden",
+            "sign": "debit",
+            "group": "admin",
+            "is_fixed": False,
+        },
+        "office_equipment": {
+            "codes": ["432001", "432101", "432201"],
+            "label": "Kantoorinventaris",
+            "sign": "debit",
+            "group": "admin",
+            "is_fixed": False,
+        },
+        "telecom": {
+            "codes": ["433001", "434001", "435001"],
+            "label": "Telefoon/Internet/Porti",
+            "sign": "debit",
+            "group": "admin",
+            "is_fixed": True,
+        },
+        "software": {
+            "codes": ["436001"],
+            "label": "Softwarekosten",
+            "sign": "debit",
+            "group": "admin",
+            "is_fixed": True,
+        },
+        "other_office": {
+            "codes": ["439001"],
+            "label": "Overige Kantoorkosten",
+            "sign": "debit",
+            "group": "admin",
+            "is_fixed": False,
+        },
+
+        # VEHICLES (440xxx - 442xxx)
+        "vehicles": {
+            "codes": ["440400", "441200", "441400", "442400"],
+            "label": "Lease/Onderhoud Vervoer",
+            "sign": "debit",
+            "group": "vehicles",
+            "is_fixed": True,
+        },
+
+        # TRAVEL & MARKETING (451xxx - 452xxx)
+        "travel": {
+            "codes": ["451000", "451500"],
+            "label": "Reis- en Representatiekosten",
+            "sign": "debit",
+            "group": "marketing",
+            "is_fixed": False,
         },
         "marketing": {
-            "codes": ["440000"],
-            "label": "Marketing & Advertising",
+            "codes": ["452010"],
+            "label": "Brand Marketing",
             "sign": "debit",
-            "group": "opex",
+            "group": "marketing",
             "is_fixed": False,
         },
-        "maintenance": {
-            "codes": ["450000"],
-            "label": "Equipment Maintenance",
+
+        # PROFESSIONAL SERVICES (460xxx - 469xxx)
+        "accounting": {
+            "codes": ["460100"],
+            "label": "Accountantskosten",
             "sign": "debit",
-            "group": "opex",
-            "is_fixed": False,
-        },
-        "supplies": {
-            "codes": ["460000"],
-            "label": "Supplies & Consumables",
-            "sign": "debit",
-            "group": "opex",
-            "is_fixed": False,
-        },
-        "insurance": {
-            "codes": ["470000"],
-            "label": "Insurance & Licenses",
-            "sign": "debit",
-            "group": "opex",
+            "group": "professional",
             "is_fixed": True,
         },
-        "depreciation": {
-            "codes": ["480000"],
-            "label": "Depreciation & Amortization",
+        "advisory": {
+            "codes": ["460500"],
+            "label": "Advieskosten",
             "sign": "debit",
-            "group": "opex",
+            "group": "professional",
+            "is_fixed": False,
+        },
+        "admin_services": {
+            "codes": ["462100"],
+            "label": "Administratiekosten",
+            "sign": "debit",
+            "group": "professional",
             "is_fixed": True,
         },
-        # CATCH-ALL: Uncomment to pick up any OpEx account by prefix:
-        # "opex_other": {
-        #     "codes": ["4%"],
-        #     "label": "Other OpEx",
-        #     "sign": "debit",
-        #     "group": "opex",
-        #     "is_fixed": False,
-        # },
+        "bank_fees": {
+            "codes": ["463000"],
+            "label": "Bankkosten",
+            "sign": "debit",
+            "group": "professional",
+            "is_fixed": True,
+        },
+        "tax_assessments": {
+            "codes": ["464000"],
+            "label": "Naheffingen Belastingdienst",
+            "sign": "debit",
+            "group": "professional",
+            "is_fixed": False,
+        },
+        "other_general": {
+            "codes": ["469000"],
+            "label": "Overige Algemene Kosten",
+            "sign": "debit",
+            "group": "professional",
+            "is_fixed": False,
+        },
+
+        # DEPRECIATION (480xxx - 483xxx)
+        "depreciation_capex": {
+            "codes": ["481000"],
+            "label": "Afschrijving CAPEX",
+            "sign": "debit",
+            "group": "depreciation",
+            "is_fixed": True,
+        },
+        "depreciation_machines": {
+            "codes": ["482000"],
+            "label": "Afschrijving Koffiemachines",
+            "sign": "debit",
+            "group": "depreciation",
+            "is_fixed": True,
+        },
+        "depreciation_inventory": {
+            "codes": ["483000"],
+            "label": "Afschrijving Inventaris",
+            "sign": "debit",
+            "group": "depreciation",
+            "is_fixed": True,
+        },
+
+        # OTHER
+        "payment_differences": {
+            "codes": ["493000"],
+            "label": "Betalingsverschillen",
+            "sign": "debit",
+            "group": "other",
+            "is_fixed": False,
+        },
     },
 
     # ── CAPEX (already working) ──────────────────
@@ -292,6 +502,12 @@ ACCOUNT_MAP = {
             "sign": "abs",
             "group": "capex",
         },
+        "depreciation_capex": {
+            "codes": ["037900"],
+            "label": "Afschrijving CAPEX Winkels",
+            "sign": "abs",
+            "group": "capex",
+        },
     },
 }
 
@@ -302,14 +518,12 @@ CAPEX_ACCOUNTS = {
     for code in entry["codes"]
 }
 
-
 def get_all_account_codes(section):
     """Get all account code patterns for a given section of the ACCOUNT_MAP."""
     codes = []
     for entry in ACCOUNT_MAP.get(section, {}).values():
         codes.extend(entry["codes"])
     return codes
-
 
 def get_category_for_account_code(raw_code, section=None):
     """Given an Odoo account code string, find the matching category key.
@@ -335,42 +549,41 @@ def get_category_for_account_code(raw_code, section=None):
 
     return best_match
 
-
 def get_sign_multiplier(entry):
-    """Return +1 or -1 based on entry's sign convention.
-
-    - "credit": use credit - debit (positive for revenue)
-    - "debit":  use debit - credit (positive for expenses)
-    - "abs":    use absolute value of balance
-    """
+    """Return +1 or -1 based on entry's sign convention."""
     sign = entry.get("sign", "abs")
     if sign == "credit":
-        return -1  # balance = debit - credit, so negate for revenue
+        return -1
     elif sign == "debit":
         return 1
-    return 0  # "abs" handled separately
-
+    return 0
 
 # ──────────────────────────────────────────────
 # PRODUCT CATEGORIES (for revenue breakdown)
 # ──────────────────────────────────────────────
-# Maps revenue account category keys to product labels
 PRODUCT_CATEGORIES = {
     "coffee": {"label": "Coffee & Espresso", "icon": "coffee", "target_cogs_pct": 0.28},
     "food": {"label": "Food & Pastries", "icon": "cake", "target_cogs_pct": 0.32},
     "merchandise": {"label": "Merchandise", "icon": "shopping_bag", "target_cogs_pct": 0.45},
-    "subscription": {"label": "Subscriptions", "icon": "autorenew", "target_cogs_pct": 0.25},
+    "retail": {"label": "Retail Products", "icon": "store", "target_cogs_pct": 0.40},
+    "other": {"label": "Other", "icon": "more_horiz", "target_cogs_pct": 0.35},
 }
 
-# Maps revenue ACCOUNT_MAP keys to product category keys (for category breakdown charts)
+# Maps revenue ACCOUNT_MAP keys to product category keys
 REVENUE_TO_PRODUCT_CATEGORY = {
-    "coffee_sales": "coffee",
+    "coffee_beverages": "coffee",
+    "coffee_retail": "retail",
     "food_sales": "food",
-    "merchandise_sales": "merchandise",
-    "subscription_revenue": "subscription",
-    "delivery_revenue": "coffee",  # delivery is mostly coffee
+    "consumables": "other",
+    "retail_noncoffee": "retail",
+    "merchandise": "merchandise",
+    "workshops": "other",
+    "equipment_sales": "other",
+    "ingredients": "other",
+    "discounts": "other",
+    "deposit": "other",
+    "other_revenue": "other",
 }
-
 
 # ──────────────────────────────────────────────
 # DAYPART DEFINITIONS
@@ -425,78 +638,37 @@ SOURCING_ORIGINS = [
     {"country": "Uganda", "region": "Mt. Elgon", "lat": 1.13, "lon": 34.53, "farmers": 32, "pct": 0.03},
 ]
 
-
 # ──────────────────────────────────────────────
 # INVESTMENT DATA PER STORE (manual input)
 # ──────────────────────────────────────────────
-# Fill these in with actual buildout costs. Used for ROI and break-even.
-# Set to 0 or omit stores where data is unknown.
 STORE_INVESTMENTS = {
-    # "LIN": {"buildout": 75000, "equipment": 35000, "furniture": 12000, "working_capital": 20000},
-    # "JPH": {"buildout": 65000, "equipment": 32000, "furniture": 10000, "working_capital": 18000},
-    # ... fill in per store
+    # Fill in actual buildout costs per store for ROI calculations
 }
-
 
 # ──────────────────────────────────────────────
 # ODOO OPTIONAL MODULES
 # ──────────────────────────────────────────────
-# Set these to True if the corresponding Odoo modules are installed.
-# The dashboard will attempt to query these models for richer data.
 ODOO_MODULES = {
-    "pos": False,        # Odoo Point of Sale (pos.order, pos.order.line)
-    "hr": False,         # Odoo HR / Payroll (hr.employee)
-    "stock": False,      # Odoo Inventory (stock.move, stock.valuation.layer)
-    "asset": False,      # Odoo Assets (account.asset)
+    "pos": False,
+    "hr": False,
+    "stock": False,
+    "asset": False,
 }
-
 
 # ──────────────────────────────────────────────
 # NMBRS (VISMA) HR/PAYROLL CONFIGURATION
 # ──────────────────────────────────────────────
-# Nmbrs provides employee, salary, and schedule data. Set up credentials
-# in .streamlit/secrets.toml or Streamlit Cloud secrets:
-#
-#   NMBRS_USERNAME = "user@company.com"
-#   NMBRS_TOKEN    = "your-api-token"
-#   NMBRS_DOMAIN   = "your-domain"     # optional, for domain-based auth
-#   NMBRS_ENV      = "production"       # or "sandbox" for testing
-#
-# To find your company IDs, use the Nmbrs diagnostic in the Settings tab.
-#
-# MULTI-COMPANY SUPPORT
-# ---------------------
-# Wakuli has multiple legal entities in Nmbrs. List them all under
-# "companies" below. Each entry maps a Nmbrs company ID to a human-
-# readable label shown in the dashboard. Employee data from all listed
-# companies is merged into one unified labor dataset.
 NMBRS_CONFIG = {
-    "enabled": True,         # Set to False to disable Nmbrs integration
+    "enabled": True,
     "companies": {
         # Nmbrs company ID → display label
-        # Fill these in after running "List All Companies" in the Settings tab.
-        # Example:
-        # 35419: "Wakulimarket B.V.",
-        # 35511: "Wakuli Retail B.V.",
+        # Use Settings tab to discover company IDs
     },
-    "full_time_hours": 40,   # Weekly hours for FTE=1.0 (NL standard: 40)
-    "employer_burden_pct": 0.30,  # Social charges, pension, insurance on top of gross
+    "full_time_hours": 40,
+    "employer_burden_pct": 0.30,
 }
 
-# Map Nmbrs department names or cost center codes to Wakuli store codes.
-# The connector uses this to assign employees to the correct store.
-# Keys can be exact department names, cost center codes, or substrings.
-#
-# To discover your Nmbrs departments, use the "Nmbrs Department Explorer"
-# in the Settings tab after connecting.
-#
-# Example:
-#   "Linnaeusstraat": "LIN",
-#   "Jan Pieter Heijestraat": "JPH",
-#   "CC001": "LIN",   # cost center code
 NMBRS_DEPARTMENT_TO_STORE = {
-    # ── Fill in your Nmbrs department → store mapping ──
-    # "Department Name in Nmbrs": "STORE_CODE",
     "Linnaeusstraat": "LIN",
     "Jan Pieter Heijestraat": "JPH",
     "Haarlemmerplein": "HAP",
@@ -521,7 +693,6 @@ NMBRS_DEPARTMENT_TO_STORE = {
     "Head Office": "OOH",
     "Hoofdkantoor": "OOH",
 }
-
 
 # ──────────────────────────────────────────────
 # APP CONFIGURATION
