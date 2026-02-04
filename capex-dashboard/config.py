@@ -476,8 +476,8 @@ NMBRS_CONFIG = {
         # Nmbrs company ID → display label
         # Fill these in after running "List All Companies" in the Settings tab.
         # Example:
-        # 12345: "Wakuli Retail BV",
-        # 67890: "Wakuli Holding BV",
+        # 35419: "Wakulimarket B.V.",
+        # 35511: "Wakuli Retail B.V.",
     },
     "full_time_hours": 40,   # Weekly hours for FTE=1.0 (NL standard: 40)
     "employer_burden_pct": 0.30,  # Social charges, pension, insurance on top of gross
