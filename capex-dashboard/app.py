@@ -2,6 +2,7 @@
 Wakuli CAPEX Budget Dashboard
 ============================
 Track construction budgets vs actuals for Wakuli stores.
+Compatible with Odoo 18.
 """
 
 import streamlit as st
@@ -100,6 +101,9 @@ CAPEX_ACCOUNTS = {
     "013000": "Verbouwingen (Renovations)"
 }
 
+# Wakuli Retail Holding company ID
+RETAIL_HOLDING_ID = 2
+
 
 def get_secret(key, default=""):
     """Safely get a secret from Streamlit secrets or environment."""
@@ -138,31 +142,27 @@ def get_odoo_connection():
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_capex_actuals(_models, db, uid, password, account_codes, year):
-    """Fetch actual CAPEX bookings from Odoo using journal items."""
+    """Fetch actual CAPEX bookings from Odoo using journal items.
+    
+    Odoo 18 compatible: filters on account.move.line with account code pattern.
+    """
     if not _models or not uid:
         return pd.DataFrame()
     
     try:
-        # First get account IDs for the selected codes
-        accounts = _models.execute_kw(db, uid, password, 'account.account', 'search_read',
-            [[['code', 'in', account_codes], ['company_id', '=', 2]]],
-            {'fields': ['id', 'code', 'name']})
+        # Build domain - filter directly on journal items
+        # Use 'like' operator for account code pattern matching
+        # In Odoo 18, we filter company on move.line, not on account
+        account_domain = ['|'] * (len(account_codes) - 1) if len(account_codes) > 1 else []
+        for code in account_codes:
+            account_domain.append(['account_id.code', '=like', f'{code}%'])
         
-        if not accounts:
-            st.warning(f"No accounts found for codes: {account_codes}")
-            return pd.DataFrame()
-        
-        account_ids = [a['id'] for a in accounts]
-        account_map = {a['id']: a['code'] for a in accounts}
-        
-        # Fetch journal items (account.move.line)
         domain = [
-            ['company_id', '=', 2],  # Wakuli Retail Holding
-            ['account_id', 'in', account_ids],
+            ['company_id', '=', RETAIL_HOLDING_ID],  # Wakuli Retail Holding
             ['date', '>=', f'{year}-01-01'],
             ['date', '<=', f'{year}-12-31'],
             ['parent_state', '=', 'posted']
-        ]
+        ] + account_domain
         
         lines = _models.execute_kw(db, uid, password, 'account.move.line', 'search_read',
             [domain],
@@ -191,8 +191,13 @@ def fetch_capex_actuals(_models, db, uid, password, account_codes, year):
                     except (ValueError, TypeError):
                         continue
             
-            account_id = line['account_id'][0] if line.get('account_id') else None
-            account_code = account_map.get(account_id, 'Unknown')
+            # Get account code from the account_id tuple [id, name]
+            account_code = "Unknown"
+            if line.get('account_id'):
+                # account_id is like [123, "037000 CAPEX Winkels"]
+                account_name = line['account_id'][1] if len(line['account_id']) > 1 else ""
+                # Extract code from name (first 6 chars typically)
+                account_code = account_name.split()[0] if account_name else "Unknown"
             
             # Use absolute value of balance (negative = cost)
             amount = abs(line.get('balance', 0) or (line.get('debit', 0) - line.get('credit', 0)))
