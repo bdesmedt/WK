@@ -1161,7 +1161,7 @@ def render_hr_tab(data, store_filter):
                 x=store_cost['labor_cost'], y=store_cost['store_name'],
                 orientation='h',
                 marker=dict(color=store_cost['labor_cost'],
-                            colorscale=[[0, COLORS['orange']], [1, COLORS['coral']]]),
+                            colorscale=[[0, COLORS['orange']], [1, COLORS['red']]]),
                 text=[fmt_eur(v) for v in store_cost['labor_cost']],
                 textposition='outside',
             ))
