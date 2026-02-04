@@ -88,6 +88,9 @@ STORE_ODOO_IDS = {
     "OOH": 19878
 }
 
+# Reverse mapping: Odoo ID -> Store Code
+ODOO_ID_TO_STORE = {v: k for k, v in STORE_ODOO_IDS.items()}
+
 # Asset accounts for CAPEX tracking
 CAPEX_ACCOUNTS = {
     "037000": "CAPEX Winkels (Store Renovations)",
@@ -98,97 +101,132 @@ CAPEX_ACCOUNTS = {
 }
 
 
+def get_secret(key, default=""):
+    """Safely get a secret from Streamlit secrets or environment."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get(key, default)
+
+
 @st.cache_resource
 def get_odoo_connection():
-    """Initialize Odoo connection using API key authentication."""
-    url = st.secrets.get("ODOO_URL", os.environ.get("ODOO_URL", "https://wakuli.odoo.com"))
-    db = st.secrets.get("ODOO_DB", os.environ.get("ODOO_DB", "wakuli-production-10206791"))
-    username = st.secrets.get("ODOO_USER", os.environ.get("ODOO_USER", "accounting@fidfinance.nl"))
-    api_key = st.secrets.get("ODOO_API_KEY", os.environ.get("ODOO_API_KEY", ""))
-
-    if not username or not api_key:
+    """Initialize Odoo connection."""
+    url = get_secret("ODOO_URL", "https://wakuli.odoo.com")
+    db = get_secret("ODOO_DB", "wakuli-production-10206791")
+    username = get_secret("ODOO_USER", "")
+    password = get_secret("ODOO_PASSWORD", "")
+    
+    if not username or not password:
         return None, None, None, None, None
-
+    
     try:
         common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
-        uid = common.authenticate(db, username, api_key, {})
+        uid = common.authenticate(db, username, password, {})
+        
+        if not uid:
+            st.error(f"❌ Authentication failed for user: {username}")
+            st.info("Check that the API key is valid and the user has API access.")
+            return None, None, None, None, None
+            
         models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
-        return url, db, uid, models, api_key
+        return url, db, uid, models, password
     except Exception as e:
         st.error(f"Connection error: {e}")
         return None, None, None, None, None
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_capex_actuals(_models, db, uid, api_key, account_codes, year):
-    """Fetch actual CAPEX bookings from Odoo."""
-    if not _models:
+def fetch_capex_actuals(_models, db, uid, password, account_codes, year):
+    """Fetch actual CAPEX bookings from Odoo using journal items."""
+    if not _models or not uid:
         return pd.DataFrame()
     
-    # Build domain for selected accounts
-    account_domain = ['|'] * (len(account_codes) - 1) if len(account_codes) > 1 else []
-    for code in account_codes:
-        account_domain.append(['account_id.code', '=', code])
-    
-    domain = [
-        ['company_id', '=', 2],  # Wakuli Retail Holding
-        ['date', '>=', f'{year}-01-01'],
-        ['date', '<=', f'{year}-12-31'],
-        ['parent_state', '=', 'posted']
-    ] + account_domain
-    
     try:
-        lines = _models.execute_kw(db, uid, api_key, 'account.analytic.line', 'search_read',
+        # First get account IDs for the selected codes
+        accounts = _models.execute_kw(db, uid, password, 'account.account', 'search_read',
+            [[['code', 'in', account_codes], ['company_id', '=', 2]]],
+            {'fields': ['id', 'code', 'name']})
+        
+        if not accounts:
+            st.warning(f"No accounts found for codes: {account_codes}")
+            return pd.DataFrame()
+        
+        account_ids = [a['id'] for a in accounts]
+        account_map = {a['id']: a['code'] for a in accounts}
+        
+        # Fetch journal items (account.move.line)
+        domain = [
+            ['company_id', '=', 2],  # Wakuli Retail Holding
+            ['account_id', 'in', account_ids],
+            ['date', '>=', f'{year}-01-01'],
+            ['date', '<=', f'{year}-12-31'],
+            ['parent_state', '=', 'posted']
+        ]
+        
+        lines = _models.execute_kw(db, uid, password, 'account.move.line', 'search_read',
             [domain],
-            {'fields': ['date', 'amount', 'name', 'general_account_id', 'x_plan2_id', 'move_line_id'],
+            {'fields': ['date', 'debit', 'credit', 'balance', 'name', 'account_id', 'analytic_distribution', 'move_id'],
              'limit': 5000})
         
         if not lines:
+            st.info(f"No journal entries found for {year}")
             return pd.DataFrame()
         
         # Process data
         data = []
         for line in lines:
-            store_code = "OOH"  # Default
-            if line.get('x_plan2_id'):
-                # Find store code from Odoo ID
-                odoo_id = line['x_plan2_id'][0] if isinstance(line['x_plan2_id'], list) else line['x_plan2_id']
-                for code, oid in STORE_ODOO_IDS.items():
-                    if oid == odoo_id:
-                        store_code = code
-                        break
+            # Parse analytic distribution to find store
+            store_code = "OOH"  # Default to overhead
+            analytic_dist = line.get('analytic_distribution') or {}
             
-            account_code = line['general_account_id'][1].split()[0] if line.get('general_account_id') else 'Unknown'
+            if analytic_dist:
+                # analytic_distribution is like {"58596": 100} where key is analytic account ID
+                for analytic_id_str, percentage in analytic_dist.items():
+                    try:
+                        analytic_id = int(analytic_id_str)
+                        if analytic_id in ODOO_ID_TO_STORE:
+                            store_code = ODOO_ID_TO_STORE[analytic_id]
+                            break
+                    except (ValueError, TypeError):
+                        continue
             
-            data.append({
-                'date': line['date'],
-                'month': line['date'][:7],
-                'amount': abs(line['amount']),  # Convert to positive for display
-                'description': line.get('name', ''),
-                'account': account_code,
-                'store_code': store_code,
-                'store_name': STORE_LOCATIONS.get(store_code, {}).get('name', store_code)
-            })
+            account_id = line['account_id'][0] if line.get('account_id') else None
+            account_code = account_map.get(account_id, 'Unknown')
+            
+            # Use absolute value of balance (negative = cost)
+            amount = abs(line.get('balance', 0) or (line.get('debit', 0) - line.get('credit', 0)))
+            
+            if amount > 0:  # Only include non-zero amounts
+                data.append({
+                    'date': line['date'],
+                    'month': line['date'][:7],
+                    'amount': amount,
+                    'description': line.get('name', '') or '',
+                    'account': account_code,
+                    'store_code': store_code,
+                    'store_name': STORE_LOCATIONS.get(store_code, {}).get('name', store_code)
+                })
         
         return pd.DataFrame(data)
+        
     except Exception as e:
         st.error(f"Error fetching data: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return pd.DataFrame()
 
 
 def load_budgets():
-    """Load budgets from local storage."""
-    budget_file = "budgets.json"
-    if os.path.exists(budget_file):
-        with open(budget_file, 'r') as f:
-            return json.load(f)
-    return {}
+    """Load budgets from session state (Streamlit Cloud doesn't have persistent local storage)."""
+    if 'budgets' not in st.session_state:
+        st.session_state.budgets = {}
+    return st.session_state.budgets
 
 
 def save_budgets(budgets):
-    """Save budgets to local storage."""
-    with open("budgets.json", 'w') as f:
-        json.dump(budgets, f, indent=2)
+    """Save budgets to session state."""
+    st.session_state.budgets = budgets
 
 
 def main():
@@ -206,17 +244,9 @@ def main():
     with st.sidebar:
         st.header("⚙️ Settings")
         
-        # Year selection (multi-year)
+        # Year selection
         current_year = datetime.now().year
-        year_options = list(range(current_year - 3, current_year + 2))
-        selected_years = st.multiselect(
-            "📅 Year(s)",
-            options=year_options,
-            default=[current_year]
-        )
-        if not selected_years:
-            selected_years = [current_year]
-        selected_years = sorted(selected_years)
+        selected_year = st.selectbox("📅 Year", options=[current_year, current_year - 1, current_year + 1], index=0)
         
         # Account selection
         st.subheader("📊 Accounts to Track")
@@ -239,43 +269,64 @@ def main():
             store_filter = list(STORE_LOCATIONS.keys())
         else:
             store_filter = [s.split(" - ")[0] for s in selected_stores]
+        
+        # Connection status
+        st.divider()
+        st.subheader("🔗 Connection")
+        odoo_user = get_secret("ODOO_USER", "")
+        if odoo_user:
+            st.success(f"User: {odoo_user[:20]}...")
+        else:
+            st.warning("Not configured")
     
     # Check Odoo connection
     connection = get_odoo_connection()
     
     if connection[0] is None:
-        st.warning("⚠️ Odoo credentials not configured. Using demo data.")
-        st.info("To connect to Odoo, set these secrets in Streamlit Cloud or environment variables:\n- ODOO_URL\n- ODOO_DB\n- ODOO_USER\n- ODOO_API_KEY")
-
-        # Demo data for each selected year
-        demo_frames = []
-        for yr in selected_years:
-            demo_data = {
-                'date': [f'{yr}-01-15', f'{yr}-02-20', f'{yr}-03-10', f'{yr}-04-05', f'{yr}-05-12', f'{yr}-06-08'],
-                'month': [f'{yr}-01', f'{yr}-02', f'{yr}-03', f'{yr}-04', f'{yr}-05', f'{yr}-06'],
-                'amount': [15000, 8500, 22000, 5000, 18000, 12000],
-                'description': ['Renovation', 'Equipment', 'Construction', 'Repairs', 'Renovation', 'Equipment'],
-                'account': ['037000', '037000', '037000', '037000', '037000', '037000'],
-                'store_code': ['HAS', 'VIS', 'THER', 'PIET', 'STOEL', 'MEENT'],
-                'store_name': ['Haarlemmerstraat', 'Visstraat', 'Theresiastraat', 'Piet Heinstraat', 'Stoeldraaierstraat', 'Meent'],
-                'year': [yr] * 6
-            }
-            demo_frames.append(pd.DataFrame(demo_data))
-        actuals_df = pd.concat(demo_frames, ignore_index=True)
+        st.warning("⚠️ Odoo credentials not configured or authentication failed.")
+        
+        with st.expander("📋 How to configure Odoo connection"):
+            st.markdown("""
+            ### In Streamlit Cloud:
+            1. Go to your app → Settings → Secrets
+            2. Add these secrets:
+            
+            ```toml
+            ODOO_URL = "https://wakuli.odoo.com"
+            ODOO_DB = "wakuli-production-10206791"
+            ODOO_USER = "your.email@company.com"
+            ODOO_PASSWORD = "your-api-key-here"
+            ```
+            
+            ### How to get an API key:
+            1. Login to Odoo
+            2. Click your profile → My Profile
+            3. Go to Account Security tab
+            4. Click "New API Key"
+            5. Copy the key (shown only once!)
+            """)
+        
+        st.info("Using demo data for preview...")
+        
+        # Demo data
+        demo_data = {
+            'date': ['2025-01-15', '2025-02-20', '2025-03-10', '2025-04-05', '2025-05-12', '2025-06-08'],
+            'month': ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06'],
+            'amount': [15000, 8500, 22000, 5000, 18000, 12000],
+            'description': ['Renovation HAS', 'Equipment VIS', 'Construction THER', 'Repairs PIET', 'Renovation STOEL', 'Equipment MEENT'],
+            'account': ['037000', '037000', '037000', '037000', '037000', '037000'],
+            'store_code': ['HAS', 'VIS', 'THER', 'PIET', 'STOEL', 'MEENT'],
+            'store_name': ['Haarlemmerstraat', 'Visstraat', 'Theresiastraat', 'Piet Heinstraat', 'Stoeldraaierstraat', 'Meent']
+        }
+        actuals_df = pd.DataFrame(demo_data)
     else:
-        url, db, uid, models, api_key = connection
-        # Fetch data for each selected year and combine
-        year_frames = []
-        for yr in selected_years:
-            yr_df = fetch_capex_actuals(models, db, uid, api_key, selected_accounts, yr)
-            if not yr_df.empty:
-                yr_df['year'] = yr
-                year_frames.append(yr_df)
-        actuals_df = pd.concat(year_frames, ignore_index=True) if year_frames else pd.DataFrame()
+        url, db, uid, models, password = connection
+        st.success(f"✅ Connected to Odoo (User ID: {uid})")
+        actuals_df = fetch_capex_actuals(models, db, uid, password, selected_accounts, selected_year)
     
     # Load budgets
     budgets = load_budgets()
-    budget_keys = [f"{yr}_{'-'.join(selected_accounts)}" for yr in selected_years]
+    budget_key = f"{selected_year}_{'-'.join(sorted(selected_accounts))}"
     
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💰 Budget Management", "🗺️ Store Map", "📋 Detailed Data"])
@@ -292,11 +343,7 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
             
             total_actual = filtered_df['amount'].sum()
-            total_budget = sum(
-                budgets.get(bk, {}).get(store, 0)
-                for bk in budget_keys
-                for store in store_filter
-            )
+            total_budget = sum(budgets.get(budget_key, {}).get(store, 0) for store in store_filter)
             variance = total_budget - total_actual
             variance_pct = (variance / total_budget * 100) if total_budget > 0 else 0
             
@@ -346,7 +393,7 @@ def main():
             for store_code in store_filter:
                 if store_code in STORE_LOCATIONS:
                     actual = filtered_df[filtered_df['store_code'] == store_code]['amount'].sum()
-                    budget = sum(budgets.get(bk, {}).get(store_code, 0) for bk in budget_keys)
+                    budget = budgets.get(budget_key, {}).get(store_code, 0)
                     comparison_data.append({
                         'Store': STORE_LOCATIONS[store_code]['name'],
                         'Code': store_code,
@@ -371,27 +418,18 @@ def main():
     # TAB 2: BUDGET MANAGEMENT
     with tab2:
         st.subheader("💰 Set Budgets per Store")
-
-        # Year selector for budget editing (pick one year at a time)
-        budget_year = st.selectbox(
-            "Select year to edit budget",
-            options=selected_years,
-            index=0,
-            key="budget_year_select"
-        )
-        budget_key = f"{budget_year}_{'-'.join(selected_accounts)}"
-        st.info(f"Setting budgets for **{budget_year}** | Accounts: {', '.join(selected_accounts)}")
-
+        st.info(f"Setting budgets for **{selected_year}** | Accounts: {', '.join(selected_accounts)}")
+        
         # Initialize budget dict for this key
         if budget_key not in budgets:
             budgets[budget_key] = {}
-
+        
         # Budget input form
         col1, col2 = st.columns(2)
-
+        
         stores_list = [(code, info) for code, info in STORE_LOCATIONS.items()]
         half = len(stores_list) // 2
-
+        
         with col1:
             for code, info in stores_list[:half]:
                 current_budget = budgets[budget_key].get(code, 0)
@@ -400,10 +438,10 @@ def main():
                     min_value=0,
                     value=int(current_budget),
                     step=1000,
-                    key=f"budget_{budget_year}_{code}"
+                    key=f"budget_{code}"
                 )
                 budgets[budget_key][code] = new_budget
-
+        
         with col2:
             for code, info in stores_list[half:]:
                 current_budget = budgets[budget_key].get(code, 0)
@@ -412,41 +450,44 @@ def main():
                     min_value=0,
                     value=int(current_budget),
                     step=1000,
-                    key=f"budget_{budget_year}_{code}"
+                    key=f"budget_{code}"
                 )
                 budgets[budget_key][code] = new_budget
-
+        
         st.divider()
-
+        
         # Quick budget templates
         st.subheader("📋 Quick Templates")
         col1, col2, col3 = st.columns(3)
-
+        
         with col1:
             if st.button("🆕 New Store Template (€50k)", use_container_width=True):
                 for code in STORE_LOCATIONS.keys():
                     budgets[budget_key][code] = 50000
-                st.success(f"Applied €50k budget to all stores for {budget_year}")
+                save_budgets(budgets)
+                st.success("Applied €50k budget to all stores")
                 st.rerun()
-
+        
         with col2:
             if st.button("🔄 Renovation Template (€25k)", use_container_width=True):
                 for code in STORE_LOCATIONS.keys():
                     budgets[budget_key][code] = 25000
-                st.success(f"Applied €25k budget to all stores for {budget_year}")
+                save_budgets(budgets)
+                st.success("Applied €25k budget to all stores")
                 st.rerun()
-
+        
         with col3:
             if st.button("🗑️ Clear All Budgets", use_container_width=True):
                 budgets[budget_key] = {}
-                st.warning(f"All budgets cleared for {budget_year}")
+                save_budgets(budgets)
+                st.warning("All budgets cleared")
                 st.rerun()
-
+        
         # Save button
         st.divider()
         if st.button("💾 Save Budgets", type="primary", use_container_width=True):
             save_budgets(budgets)
-            st.success("✅ Budgets saved successfully!")
+            st.success("✅ Budgets saved to session!")
             st.balloons()
     
     # TAB 3: STORE MAP
@@ -458,7 +499,7 @@ def main():
         for code, info in STORE_LOCATIONS.items():
             if code != "OOH" and 'lat' in info:
                 actual = actuals_df[actuals_df['store_code'] == code]['amount'].sum() if not actuals_df.empty else 0
-                budget = sum(budgets.get(bk, {}).get(code, 0) for bk in budget_keys)
+                budget = budgets.get(budget_key, {}).get(code, 0)
                 map_data.append({
                     'lat': info['lat'],
                     'lon': info['lon'],
@@ -525,6 +566,9 @@ def main():
         else:
             filtered_df = actuals_df[actuals_df['store_code'].isin(store_filter)]
             
+            # Summary stats
+            st.metric("Total transactions", len(filtered_df))
+            
             # Summary table
             st.dataframe(
                 filtered_df[['date', 'store_name', 'account', 'amount', 'description']].sort_values('date', ascending=False),
@@ -544,7 +588,7 @@ def main():
             st.download_button(
                 label="📥 Download CSV",
                 data=csv,
-                file_name=f"wakuli_capex_{'_'.join(str(y) for y in selected_years)}.csv",
+                file_name=f"wakuli_capex_{selected_year}.csv",
                 mime="text/csv"
             )
 
