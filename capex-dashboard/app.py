@@ -20,6 +20,7 @@ from config import (
     TARGETS, SOURCING_ORIGINS, PRODUCT_CATEGORIES, DAYPARTS,
     APP_CONFIG, COLOR_POSITIVE, COLOR_NEGATIVE, COLOR_WARNING,
     ACCOUNT_MAP, ODOO_MODULES, ODOO_ID_TO_STORE, get_all_account_codes,
+    NMBRS_CONFIG, NMBRS_DEPARTMENT_TO_STORE,
 )
 from styles import get_brand_css
 from odoo_connector import (
@@ -27,6 +28,11 @@ from odoo_connector import (
     fetch_cost_data, fetch_pos_orders, fetch_employees,
     fetch_chart_of_accounts, fetch_analytic_accounts,
     check_data_availability, get_secret,
+)
+from nmbrs_connector import (
+    is_nmbrs_configured, build_labor_data_from_nmbrs,
+    check_nmbrs_connection, fetch_nmbrs_employees,
+    fetch_nmbrs_departments, fetch_nmbrs_salary_data,
 )
 from demo_data import generate_all_demo_data
 from kpi_engine import (
@@ -118,12 +124,17 @@ def render_sidebar():
         st.markdown("---")
 
         # Connection status
-        st.markdown("**Data Source**")
+        st.markdown("**Data Sources**")
         odoo_user = get_secret("ODOO_USER", "")
         if odoo_user:
             st.success(f"Odoo: {odoo_user[:20]}...")
         else:
-            st.info("Demo mode (no Odoo)")
+            st.info("Odoo: not configured")
+
+        if is_nmbrs_configured():
+            st.success("Nmbrs: connected")
+        else:
+            st.info("Nmbrs: not configured")
 
         st.markdown("---")
         st.markdown("""
@@ -208,6 +219,17 @@ def load_data(selected_years, selected_accounts):
         demo['uid'] = None
         demo['password'] = None
         data_sources = {s: 'demo' for s in ['revenue', 'costs', 'capex']}
+
+    # --- Nmbrs: labor/employee data (independent of Odoo) ---
+    if NMBRS_CONFIG.get("enabled") and is_nmbrs_configured():
+        nmbrs_labor = build_labor_data_from_nmbrs(demo['revenue'], years_tuple)
+        if not nmbrs_labor.empty:
+            demo['labor'] = nmbrs_labor
+            data_sources['labor'] = 'nmbrs'
+        else:
+            data_sources['labor'] = 'demo'
+    else:
+        data_sources['labor'] = 'demo'
 
     demo['data_sources'] = data_sources
     return demo
@@ -1034,6 +1056,313 @@ def render_capex_tab(data, store_filter, selected_accounts, selected_years):
 
 
 # ──────────────────────────────────────────────
+# TAB: HR / LABOR
+# ──────────────────────────────────────────────
+def render_hr_tab(data, store_filter):
+    """HR & Labor analytics — headcount, FTE, salary costs, efficiency.
+
+    Pulls from Nmbrs when connected, otherwise uses demo labor data.
+    Shows per-company breakdowns when multiple Nmbrs companies are configured.
+    """
+    labor_df = data['labor']
+    revenue_df = data['revenue']
+    data_sources = data.get('data_sources', {})
+    labor_source = data_sources.get('labor', 'demo')
+
+    if not labor_df.empty:
+        labor_df = labor_df[labor_df['store_code'].isin(store_filter)]
+    if not revenue_df.empty:
+        revenue_df = revenue_df[revenue_df['store_code'].isin(store_filter)]
+
+    # Source indicator
+    if labor_source == 'nmbrs':
+        companies = NMBRS_CONFIG.get("companies", {})
+        company_names = ', '.join(companies.values()) if companies else "Nmbrs"
+        st.success(f"Live HR data from Nmbrs ({company_names})")
+    else:
+        st.info("Showing demo labor data. Connect Nmbrs in the Settings tab for real HR/payroll data.")
+
+    # ── TOP-LINE KPIs ──
+    section_header("Workforce Overview", "Headcount, FTE, and labor cost summary")
+
+    labor_metrics = calculate_labor_efficiency(labor_df, store_filter)
+    if labor_metrics:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            total_headcount = labor_df['store_code'].nunique() if labor_df.empty else 0
+            # Calculate actual headcount from FTE data
+            if not labor_df.empty:
+                latest_month = labor_df[['year', 'month']].drop_duplicates().sort_values(
+                    ['year', 'month']).iloc[-1]
+                latest_labor = labor_df[
+                    (labor_df['year'] == latest_month['year']) &
+                    (labor_df['month'] == latest_month['month'])
+                ]
+                total_fte = latest_labor['fte_count'].sum()
+            else:
+                total_fte = 0
+            metric_card("Total FTE", f"{total_fte:.1f}", color="orange")
+        with c2:
+            metric_card("Total Labor Cost", fmt_eur(labor_metrics['total_labor_cost']),
+                        color="teal")
+        with c3:
+            metric_card("Labor Cost %", fmt_pct(labor_metrics['labor_cost_pct']),
+                        delta=-labor_metrics['vs_target'],
+                        delta_suffix="% vs target", color="green")
+        with c4:
+            metric_card("Rev/Labor Hour", f"\u20ac{labor_metrics['revenue_per_labor_hour']:.0f}",
+                        delta=labor_metrics['revenue_per_labor_hour'] - TARGETS['revenue_per_labor_hour'],
+                        delta_suffix=" vs target", color="yellow")
+        with c5:
+            metric_card("Rev/Employee/Mo", fmt_eur(labor_metrics['revenue_per_employee_month']),
+                        color="orange")
+
+    if labor_df.empty:
+        st.info("No labor data available for the selected stores.")
+        return
+
+    st.markdown("")
+
+    # ── HEADCOUNT & FTE BY STORE ──
+    col1, col2 = st.columns(2)
+
+    with col1:
+        section_header("FTE by Store", "Full-time equivalents per location")
+        if not labor_df.empty:
+            # Use latest month's snapshot
+            latest_month = labor_df[['year', 'month']].drop_duplicates().sort_values(
+                ['year', 'month']).iloc[-1]
+            latest_labor = labor_df[
+                (labor_df['year'] == latest_month['year']) &
+                (labor_df['month'] == latest_month['month'])
+            ]
+            store_fte = latest_labor.groupby('store_name')['fte_count'].sum().reset_index()
+            store_fte = store_fte.sort_values('fte_count', ascending=True)
+
+            fig = go.Figure(go.Bar(
+                x=store_fte['fte_count'], y=store_fte['store_name'],
+                orientation='h',
+                marker=dict(color=store_fte['fte_count'],
+                            colorscale=[[0, COLORS['teal']], [1, COLORS['orange']]]),
+                text=[f"{v:.1f}" for v in store_fte['fte_count']],
+                textposition='outside',
+            ))
+            fig = apply_brand_layout(fig, height=max(300, len(store_fte) * 28), show_legend=False)
+            fig.update_layout(xaxis_title="FTE")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        section_header("Monthly Labor Cost by Store", "Total employer cost per location")
+        if not labor_df.empty:
+            store_cost = latest_labor.groupby('store_name')['labor_cost'].sum().reset_index()
+            store_cost = store_cost.sort_values('labor_cost', ascending=True)
+
+            fig = go.Figure(go.Bar(
+                x=store_cost['labor_cost'], y=store_cost['store_name'],
+                orientation='h',
+                marker=dict(color=store_cost['labor_cost'],
+                            colorscale=[[0, COLORS['orange']], [1, COLORS['coral']]]),
+                text=[fmt_eur(v) for v in store_cost['labor_cost']],
+                textposition='outside',
+            ))
+            fig = apply_brand_layout(fig, height=max(300, len(store_cost) * 28), show_legend=False)
+            fig.update_layout(xaxis_title="Monthly Cost (EUR)")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ── LABOR COST TREND ──
+    st.markdown("")
+    section_header("Labor Cost Trend", "Monthly total labor cost over time")
+
+    monthly_labor = labor_df.groupby(['year', 'month']).agg(
+        total_cost=('labor_cost', 'sum'),
+        total_fte=('fte_count', 'sum'),
+        total_revenue=('revenue', 'sum'),
+    ).reset_index()
+    monthly_labor['period'] = monthly_labor['year'].astype(str) + '-' + monthly_labor['month'].astype(str).str.zfill(2)
+    monthly_labor['labor_pct'] = (monthly_labor['total_cost'] / monthly_labor['total_revenue'] * 100).round(1)
+    monthly_labor = monthly_labor.sort_values('period')
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=monthly_labor['period'], y=monthly_labor['total_cost'],
+        name='Labor Cost', marker_color=COLORS['orange'],
+        text=[fmt_eur(v) for v in monthly_labor['total_cost']],
+        textposition='outside',
+    ))
+    fig.add_trace(go.Scatter(
+        x=monthly_labor['period'], y=monthly_labor['labor_pct'],
+        name='Labor %', yaxis='y2',
+        line=dict(color=COLORS['teal'], width=3),
+        mode='lines+markers',
+    ))
+    fig = apply_brand_layout(fig, height=400)
+    fig.update_layout(
+        yaxis_title="Labor Cost (EUR)",
+        yaxis2=dict(title="Labor %", overlaying='y', side='right',
+                    showgrid=False, ticksuffix='%'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+    )
+    # Target line for labor %
+    fig.add_hline(y=TARGETS['labor_cost_pct'] * 100, line_dash="dash",
+                  line_color=COLORS['charcoal'], yref='y2',
+                  annotation_text=f"Target: {TARGETS['labor_cost_pct']*100:.0f}%")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── LABOR EFFICIENCY BY STORE ──
+    st.markdown("")
+    section_header("Labor Efficiency by Store", "Revenue per labor hour and labor cost % per store")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        store_efficiency = labor_df.groupby('store_name').agg({
+            'revenue_per_labor_hour': 'mean',
+        }).reset_index().sort_values('revenue_per_labor_hour', ascending=True)
+
+        colors = [COLOR_POSITIVE if v >= TARGETS['revenue_per_labor_hour']
+                  else COLOR_WARNING if v >= TARGETS['revenue_per_labor_hour'] * 0.8
+                  else COLOR_NEGATIVE
+                  for v in store_efficiency['revenue_per_labor_hour']]
+
+        fig = go.Figure(go.Bar(
+            x=store_efficiency['revenue_per_labor_hour'], y=store_efficiency['store_name'],
+            orientation='h',
+            marker_color=colors,
+            text=[f"\u20ac{v:.0f}" for v in store_efficiency['revenue_per_labor_hour']],
+            textposition='outside',
+        ))
+        fig.add_vline(x=TARGETS['revenue_per_labor_hour'], line_dash="dash",
+                      line_color=COLORS['charcoal'],
+                      annotation_text=f"Target: \u20ac{TARGETS['revenue_per_labor_hour']}")
+        fig = apply_brand_layout(fig, height=max(300, len(store_efficiency) * 28), show_legend=False)
+        fig.update_layout(xaxis_title="Revenue per Labor Hour (EUR)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        store_labor_pct = labor_df.groupby('store_name').agg({
+            'labor_cost_pct': 'mean',
+        }).reset_index()
+        store_labor_pct['labor_cost_pct'] = store_labor_pct['labor_cost_pct'] * 100
+        store_labor_pct = store_labor_pct.sort_values('labor_cost_pct', ascending=True)
+
+        target_pct = TARGETS['labor_cost_pct'] * 100
+        colors = [COLOR_POSITIVE if v <= target_pct
+                  else COLOR_WARNING if v <= target_pct * 1.1
+                  else COLOR_NEGATIVE
+                  for v in store_labor_pct['labor_cost_pct']]
+
+        fig = go.Figure(go.Bar(
+            x=store_labor_pct['labor_cost_pct'], y=store_labor_pct['store_name'],
+            orientation='h',
+            marker_color=colors,
+            text=[f"{v:.1f}%" for v in store_labor_pct['labor_cost_pct']],
+            textposition='outside',
+        ))
+        fig.add_vline(x=target_pct, line_dash="dash",
+                      line_color=COLORS['charcoal'],
+                      annotation_text=f"Target: {target_pct:.0f}%")
+        fig = apply_brand_layout(fig, height=max(300, len(store_labor_pct) * 28), show_legend=False)
+        fig.update_layout(xaxis_title="Labor Cost % of Revenue")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── FTE TREND ──
+    st.markdown("")
+    section_header("FTE Trend", "Total FTE across all stores over time")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=monthly_labor['period'], y=monthly_labor['total_fte'],
+        mode='lines+markers+text',
+        line=dict(color=COLORS['orange'], width=3),
+        marker=dict(size=8),
+        text=[f"{v:.1f}" for v in monthly_labor['total_fte']],
+        textposition='top center',
+        name='Total FTE',
+    ))
+    fig = apply_brand_layout(fig, height=350, show_legend=False)
+    fig.update_layout(yaxis_title="Total FTE")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── STORE DETAIL TABLE ──
+    st.markdown("")
+    section_header("Store Labor Detail", "Complete labor metrics per store")
+
+    store_detail = labor_df.groupby(['store_code', 'store_name']).agg(
+        avg_fte=('fte_count', 'mean'),
+        total_labor_cost=('labor_cost', 'sum'),
+        total_revenue=('revenue', 'sum'),
+        avg_rev_per_hour=('revenue_per_labor_hour', 'mean'),
+        avg_labor_pct=('labor_cost_pct', 'mean'),
+    ).reset_index()
+    store_detail['avg_labor_pct'] = store_detail['avg_labor_pct'] * 100
+
+    st.dataframe(
+        store_detail.sort_values('total_labor_cost', ascending=False),
+        use_container_width=True, hide_index=True,
+        column_config={
+            'store_code': 'Code',
+            'store_name': 'Store',
+            'avg_fte': st.column_config.NumberColumn('Avg FTE', format='%.1f'),
+            'total_labor_cost': st.column_config.NumberColumn('Total Labor Cost', format='\u20ac%,.0f'),
+            'total_revenue': st.column_config.NumberColumn('Total Revenue', format='\u20ac%,.0f'),
+            'avg_rev_per_hour': st.column_config.NumberColumn('Rev/Labor Hr', format='\u20ac%.0f'),
+            'avg_labor_pct': st.column_config.NumberColumn('Labor %', format='%.1f%%'),
+        },
+    )
+
+    # ── NMBRS EMPLOYEE DETAIL (only when live data) ──
+    if labor_source == 'nmbrs':
+        st.markdown("")
+        section_header("Employee Detail", "Live employee data from Nmbrs (across all companies)")
+
+        emp_df = fetch_nmbrs_employees()
+        if not emp_df.empty:
+            emp_df = emp_df[emp_df['store_code'].isin(store_filter)]
+
+            # Company breakdown
+            if 'nmbrs_company' in emp_df.columns and emp_df['nmbrs_company'].nunique() > 1:
+                company_summary = emp_df.groupby('nmbrs_company').agg(
+                    headcount=('employee_id', 'count'),
+                    total_fte=('fte_factor', 'sum'),
+                ).reset_index()
+
+                fig = go.Figure()
+                for i, (_, row) in enumerate(company_summary.iterrows()):
+                    fig.add_trace(go.Bar(
+                        x=[row['nmbrs_company']],
+                        y=[row['total_fte']],
+                        name=row['nmbrs_company'],
+                        text=[f"{row['total_fte']:.1f} FTE\n({int(row['headcount'])} employees)"],
+                        textposition='outside',
+                        marker_color=CHART_COLORS[i % len(CHART_COLORS)],
+                    ))
+                fig = apply_brand_layout(fig, height=300, show_legend=True)
+                fig.update_layout(yaxis_title="FTE", showlegend=True)
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Employee table
+            display_cols = ['name', 'store_name', 'department', 'job_title', 'fte_factor', 'start_date']
+            if 'nmbrs_company' in emp_df.columns and emp_df['nmbrs_company'].nunique() > 1:
+                display_cols.append('nmbrs_company')
+
+            col_config = {
+                'name': 'Name',
+                'store_name': 'Store',
+                'department': 'Department',
+                'job_title': 'Job Title',
+                'fte_factor': st.column_config.NumberColumn('FTE', format='%.2f'),
+                'start_date': 'Start Date',
+                'nmbrs_company': 'Company',
+            }
+
+            st.dataframe(
+                emp_df[display_cols].sort_values(['store_name', 'name']),
+                use_container_width=True, hide_index=True,
+                column_config=col_config,
+            )
+
+
+# ──────────────────────────────────────────────
 # TAB: IMPACT DASHBOARD
 # ──────────────────────────────────────────────
 def render_impact_tab(data):
@@ -1411,6 +1740,7 @@ def render_settings_tab(data, selected_years):
 
     source_labels = {
         'odoo': ('Odoo (live)', 'good'),
+        'nmbrs': ('Nmbrs (live)', 'good'),
         'demo': ('Demo data', 'warning'),
     }
 
@@ -1536,21 +1866,265 @@ def render_settings_tab(data, selected_years):
         st.info("Connect to Odoo to use the Account Explorer. "
                 "This tool lets you discover account codes and verify your ACCOUNT_MAP configuration.")
 
+    # ── NMBRS INTEGRATION ──────────────────────────
+    st.markdown("")
+    section_header("Nmbrs (Visma) Integration", "Employee, salary, and schedule data from Nmbrs HR/Payroll")
+
+    nmbrs_configured = is_nmbrs_configured()
+
+    if nmbrs_configured:
+        st.success("Nmbrs credentials detected.")
+
+        # ── Company Discovery & Connection Test ──
+        st.markdown("**Company Discovery**")
+        st.caption("Lists all Nmbrs companies accessible with your credentials. "
+                   "Copy the IDs into NMBRS_CONFIG['companies'] in config.py.")
+        if st.button("List All Companies & Test Connection", key="test_nmbrs"):
+            with st.spinner("Connecting to Nmbrs..."):
+                status = check_nmbrs_connection()
+                st.session_state['nmbrs_status'] = status
+
+        if 'nmbrs_status' in st.session_state:
+            ns = st.session_state['nmbrs_status']
+            if ns['connected']:
+                all_co = ns.get('all_companies', [])
+                configured_co = ns.get('companies', [])
+                st.success(f"Connected — {len(all_co)} companies accessible, "
+                           f"{len(configured_co)} configured, "
+                           f"{ns['total_employees']} employees total")
+
+                # Show ALL accessible companies with config status
+                co_rows = []
+                for co in all_co:
+                    co_rows.append({
+                        "ID": co["id"],
+                        "Company": co["name"],
+                        "Number": co.get("number", ""),
+                        "Employees": co["employee_count"],
+                        "Status": "Configured" if co["configured"] else "Not configured",
+                    })
+                if co_rows:
+                    st.dataframe(
+                        pd.DataFrame(co_rows), use_container_width=True, hide_index=True,
+                        column_config={
+                            'ID': st.column_config.NumberColumn('Nmbrs ID', format='%d'),
+                            'Company': 'Company Name',
+                            'Number': 'Company #',
+                            'Employees': st.column_config.NumberColumn('Employees', format='%d'),
+                            'Status': 'Config Status',
+                        },
+                    )
+
+                    unconfigured = [co for co in all_co if not co["configured"]]
+                    if unconfigured:
+                        st.info(
+                            "To add a company, copy its ID into config.py:\n\n"
+                            "```python\n"
+                            "NMBRS_CONFIG = {\n"
+                            '    "companies": {\n'
+                            + "".join(f'        {co["id"]}: "{co["name"]}",\n' for co in all_co)
+                            + "    },\n"
+                            "    ...\n"
+                            "}\n"
+                            "```"
+                        )
+            else:
+                st.error(f"Connection failed: {ns['error']}")
+
+        # ── Configured companies summary ──
+        configured_companies = NMBRS_CONFIG.get("companies", {})
+        if configured_companies:
+            st.markdown("")
+            st.markdown(f"**Configured companies** ({len(configured_companies)}):")
+            for cid, label in configured_companies.items():
+                st.markdown(f"- {badge(str(cid), 'good')} {label}", unsafe_allow_html=True)
+        else:
+            st.warning("No companies configured yet. Click 'List All Companies' above to "
+                       "discover your Nmbrs company IDs.")
+
+        # ── Department Explorer ──
+        st.markdown("")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Department Explorer**")
+            st.caption("Discover Nmbrs departments and cost centers across all "
+                       "configured companies for the NMBRS_DEPARTMENT_TO_STORE mapping.")
+            if st.button("Fetch Departments", key="fetch_nmbrs_depts"):
+                with st.spinner("Fetching departments from all companies..."):
+                    dept_df = fetch_nmbrs_departments()
+                    if not dept_df.empty:
+                        st.session_state['nmbrs_depts'] = dept_df
+                        st.success(f"Found {len(dept_df)} departments/cost centers")
+                    else:
+                        st.warning("No departments found. Check company IDs.")
+
+            if 'nmbrs_depts' in st.session_state and not st.session_state['nmbrs_depts'].empty:
+                dept_data = st.session_state['nmbrs_depts']
+                # Group by company
+                for company_label in dept_data['nmbrs_company'].unique():
+                    st.markdown(f"*{company_label}:*")
+                    company_depts = dept_data[dept_data['nmbrs_company'] == company_label]
+                    for _, row in company_depts.iterrows():
+                        mapped = NMBRS_DEPARTMENT_TO_STORE.get(row['description'])
+                        status_badge = (badge(mapped, "good") if mapped
+                                        else badge("not mapped", "warning"))
+                        st.markdown(
+                            f"&nbsp;&nbsp;**{row['type'].title()}**: {row['description']} "
+                            f"(ID: {row['id']}) {status_badge}",
+                            unsafe_allow_html=True,
+                        )
+
+        with col2:
+            st.markdown("**Current Department → Store Mapping**")
+            mapping_rows = [{"Department/Cost Center": k, "Store Code": v}
+                            for k, v in NMBRS_DEPARTMENT_TO_STORE.items()]
+            if mapping_rows:
+                st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No mappings configured. Edit NMBRS_DEPARTMENT_TO_STORE in config.py.")
+
+        # ── Employee overview ──
+        st.markdown("")
+        st.markdown("**Employee Overview** (all configured companies merged)")
+        if st.button("Load Employee Data", key="load_nmbrs_employees"):
+            with st.spinner("Fetching employees from all companies..."):
+                emp_df = fetch_nmbrs_employees()
+                if not emp_df.empty:
+                    st.session_state['nmbrs_employees'] = emp_df
+                    st.success(f"Loaded {len(emp_df)} employees")
+                else:
+                    st.warning("No employees found.")
+
+        if 'nmbrs_employees' in st.session_state and not st.session_state['nmbrs_employees'].empty:
+            emp = st.session_state['nmbrs_employees']
+
+            # Summary by company
+            company_summary = emp.groupby('nmbrs_company').agg(
+                headcount=('employee_id', 'count'),
+                total_fte=('fte_factor', 'sum'),
+            ).reset_index()
+            for _, row in company_summary.iterrows():
+                st.markdown(f"**{row['nmbrs_company']}**: {int(row['headcount'])} employees, "
+                            f"{row['total_fte']:.1f} FTE")
+
+            # Summary by store (merged across companies)
+            store_summary = emp.groupby(['store_code', 'store_name']).agg(
+                headcount=('employee_id', 'count'),
+                total_fte=('fte_factor', 'sum'),
+                companies=('nmbrs_company', lambda x: ', '.join(sorted(x.unique()))),
+            ).reset_index().sort_values('headcount', ascending=False)
+
+            st.dataframe(
+                store_summary, use_container_width=True, hide_index=True,
+                column_config={
+                    'store_code': 'Code',
+                    'store_name': 'Store',
+                    'headcount': st.column_config.NumberColumn('Headcount', format='%d'),
+                    'total_fte': st.column_config.NumberColumn('FTE', format='%.1f'),
+                    'companies': 'From Companies',
+                },
+            )
+
+            with st.expander("Full employee list", expanded=False):
+                st.dataframe(
+                    emp[['name', 'department', 'store_name', 'job_title',
+                         'fte_factor', 'start_date', 'nmbrs_company']],
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        'name': 'Name',
+                        'department': 'Department',
+                        'store_name': 'Store',
+                        'job_title': 'Job Title',
+                        'fte_factor': st.column_config.NumberColumn('FTE', format='%.2f'),
+                        'start_date': 'Start Date',
+                        'nmbrs_company': 'Company',
+                    },
+                )
+
+        # ── Salary overview ──
+        st.markdown("")
+        st.markdown("**Salary Overview** (aggregated, all companies)")
+        if st.button("Load Salary Data", key="load_nmbrs_salary"):
+            with st.spinner("Fetching salary data from all companies..."):
+                sal_df = fetch_nmbrs_salary_data()
+                if not sal_df.empty:
+                    st.session_state['nmbrs_salary'] = sal_df
+                    st.success(f"Loaded salary data for {len(sal_df)} employees")
+                else:
+                    st.warning("No salary data found.")
+
+        if 'nmbrs_salary' in st.session_state and not st.session_state['nmbrs_salary'].empty:
+            sal = st.session_state['nmbrs_salary']
+
+            # Per-company totals
+            company_sal = sal.groupby('nmbrs_company').agg(
+                headcount=('employee_id', 'count'),
+                total_employer_cost=('employer_cost_month', 'sum'),
+            ).reset_index()
+            for _, row in company_sal.iterrows():
+                st.markdown(f"**{row['nmbrs_company']}**: {int(row['headcount'])} employees, "
+                            f"\u20ac{row['total_employer_cost']:,.0f}/mo total employer cost")
+
+            # Aggregated by store (no individual salaries shown for privacy)
+            store_sal = sal.groupby(['store_code', 'store_name']).agg(
+                headcount=('employee_id', 'count'),
+                total_gross=('gross_salary_month', 'sum'),
+                total_employer_cost=('employer_cost_month', 'sum'),
+                avg_fte=('fte_factor', 'mean'),
+            ).reset_index().sort_values('total_employer_cost', ascending=False)
+
+            st.dataframe(
+                store_sal, use_container_width=True, hide_index=True,
+                column_config={
+                    'store_code': 'Code',
+                    'store_name': 'Store',
+                    'headcount': st.column_config.NumberColumn('Headcount', format='%d'),
+                    'total_gross': st.column_config.NumberColumn('Total Gross/mo', format='\u20ac%.0f'),
+                    'total_employer_cost': st.column_config.NumberColumn('Total Cost/mo', format='\u20ac%.0f'),
+                    'avg_fte': st.column_config.NumberColumn('Avg FTE', format='%.2f'),
+                },
+            )
+
+    else:
+        st.info("Nmbrs not configured. Add NMBRS_USERNAME and NMBRS_TOKEN to "
+                ".streamlit/secrets.toml or Streamlit Cloud secrets to enable "
+                "HR/payroll data integration.")
+        st.markdown("""
+        **Setup steps:**
+        1. Get an API token from your Nmbrs admin (Settings → API Tokens)
+        2. Add to secrets: `NMBRS_USERNAME`, `NMBRS_TOKEN`
+        3. Optionally add `NMBRS_DOMAIN` and `NMBRS_ENV`
+        4. Click "List All Companies" to discover your company IDs
+        5. Add company IDs to `NMBRS_CONFIG["companies"]` in config.py
+        6. Map departments to stores in `NMBRS_DEPARTMENT_TO_STORE`
+        """)
+
     # Configuration Reference
     st.markdown("")
     section_header("How to Configure", "Steps to connect real data")
     st.markdown("""
-    1. **Set Odoo credentials** in `.streamlit/secrets.toml` or Streamlit Cloud secrets
-    2. **Open this Settings tab** and click "Fetch Chart of Accounts"
-    3. **Identify your account codes** — find revenue accounts (usually 8xxxxx),
+    **Odoo (Financial Data):**
+    1. Set Odoo credentials in `.streamlit/secrets.toml` or Streamlit Cloud secrets
+    2. Open this Settings tab and click "Fetch Chart of Accounts"
+    3. Identify your account codes — find revenue accounts (usually 8xxxxx),
        COGS accounts (usually 4xxxxx), and operating expense accounts
-    4. **Edit `config.py`** — update the `ACCOUNT_MAP` dict with your real codes
-    5. **Restart the app** — sections with valid codes will show real Odoo data
+    4. Edit `config.py` — update the `ACCOUNT_MAP` dict with your real codes
+    5. Restart the app — sections with valid codes will show real Odoo data
 
     Each ACCOUNT_MAP entry needs:
     - `codes`: List of Odoo account code patterns (e.g. `["800000"]` or `["8%"]` for wildcards)
     - `label`: Display name in the dashboard
     - `sign`: `"credit"` for revenue, `"debit"` for expenses, `"abs"` for assets/CAPEX
+
+    **Nmbrs (HR/Payroll Data):**
+    1. Get an API token from Nmbrs (admin → Settings → API Tokens)
+    2. Add `NMBRS_USERNAME` and `NMBRS_TOKEN` to secrets
+    3. Click "List All Companies" in Settings to discover company IDs
+    4. Add both company IDs to `NMBRS_CONFIG["companies"]` in config.py
+    5. Use the Department Explorer to discover department names
+    6. Map departments to store codes in `NMBRS_DEPARTMENT_TO_STORE`
+    7. Restart — the Labor section will merge data from both companies
     """)
 
 
@@ -1579,17 +2153,28 @@ def main():
     odoo_sections = [k for k, v in data_sources.items() if v == 'odoo']
     demo_sections = [k for k, v in data_sources.items() if v == 'demo']
 
-    if not data['has_odoo']:
-        st.info("Running in demo mode — no Odoo credentials configured. "
+    nmbrs_sections = [k for k, v in data_sources.items() if v == 'nmbrs']
+
+    if not data['has_odoo'] and not nmbrs_sections:
+        st.info("Running in demo mode — no Odoo/Nmbrs credentials configured. "
                 "All data shown is illustrative. See the Settings tab to connect.")
-    elif demo_sections:
-        odoo_text = ', '.join(s.upper() for s in odoo_sections) if odoo_sections else 'none'
-        demo_text = ', '.join(s.upper() for s in demo_sections)
-        st.info(f"Connected to Odoo. Live data: **{odoo_text}**. "
-                f"Demo fallback: **{demo_text}**. "
-                f"Configure account codes in Settings tab to enable more sections.")
     else:
-        st.success("All data sourced from Odoo.")
+        live_parts = []
+        if odoo_sections:
+            live_parts.append(f"Odoo: **{', '.join(s.upper() for s in odoo_sections)}**")
+        if nmbrs_sections:
+            live_parts.append(f"Nmbrs: **{', '.join(s.upper() for s in nmbrs_sections)}**")
+        if demo_sections:
+            demo_text = ', '.join(s.upper() for s in demo_sections)
+            if live_parts:
+                st.info(f"Live data from {'; '.join(live_parts)}. "
+                        f"Demo fallback: **{demo_text}**. "
+                        f"Configure more in the Settings tab.")
+            else:
+                st.info(f"Demo fallback: **{demo_text}**. "
+                        f"Configure data sources in the Settings tab.")
+        else:
+            st.success(f"All data sourced from live systems: {'; '.join(live_parts)}.")
 
     # Tabs
     tabs = st.tabs([
@@ -1597,6 +2182,7 @@ def main():
         "Financial Deep Dive",
         "Revenue Analytics",
         "Cost & Efficiency",
+        "HR / Labor",
         "Customers",
         "CAPEX Tracking",
         "Impact Dashboard",
@@ -1618,21 +2204,24 @@ def main():
         render_cost_tab(data, store_filter)
 
     with tabs[4]:
-        render_customers_tab(data, store_filter)
+        render_hr_tab(data, store_filter)
 
     with tabs[5]:
-        render_capex_tab(data, store_filter, selected_accounts, selected_years)
+        render_customers_tab(data, store_filter)
 
     with tabs[6]:
-        render_impact_tab(data)
+        render_capex_tab(data, store_filter, selected_accounts, selected_years)
 
     with tabs[7]:
-        render_map_tab(data, store_filter)
+        render_impact_tab(data)
 
     with tabs[8]:
-        render_comparative_tab(data, store_filter, selected_years)
+        render_map_tab(data, store_filter)
 
     with tabs[9]:
+        render_comparative_tab(data, store_filter, selected_years)
+
+    with tabs[10]:
         render_settings_tab(data, selected_years)
 
 
