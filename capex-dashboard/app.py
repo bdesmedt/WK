@@ -19,9 +19,15 @@ from config import (
     STORE_LOCATIONS, STORE_ODOO_IDS, CAPEX_ACCOUNTS, COLORS, CHART_COLORS,
     TARGETS, SOURCING_ORIGINS, PRODUCT_CATEGORIES, DAYPARTS,
     APP_CONFIG, COLOR_POSITIVE, COLOR_NEGATIVE, COLOR_WARNING,
+    ACCOUNT_MAP, ODOO_MODULES, ODOO_ID_TO_STORE, get_all_account_codes,
 )
 from styles import get_brand_css
-from odoo_connector import authenticate_odoo, fetch_capex_actuals, get_secret
+from odoo_connector import (
+    authenticate_odoo, fetch_capex_actuals, fetch_revenue_data,
+    fetch_cost_data, fetch_pos_orders, fetch_employees,
+    fetch_chart_of_accounts, fetch_analytic_accounts,
+    check_data_availability, get_secret,
+)
 from demo_data import generate_all_demo_data
 from kpi_engine import (
     calculate_store_roi, calculate_break_even, calculate_profitability,
@@ -132,33 +138,79 @@ def render_sidebar():
 
 
 # ──────────────────────────────────────────────
-# DATA LOADING
+# DATA LOADING — per-section Odoo with demo fallback
 # ──────────────────────────────────────────────
 def load_data(selected_years, selected_accounts):
-    """Load data from Odoo or generate demo data."""
+    """Load data from Odoo where configured, fall back to demo per section.
+
+    For each data category (revenue, costs, capex), attempts to fetch from
+    Odoo first. If Odoo returns data, it's used; otherwise demo data is used
+    for that section. This allows a gradual rollout: configure real account
+    codes in ACCOUNT_MAP section by section.
+    """
     auth = authenticate_odoo()
     db, uid, password, odoo_url = auth
     has_odoo = db is not None and uid is not None
 
-    if has_odoo:
-        capex_df = fetch_capex_actuals(db, uid, password, tuple(selected_accounts), tuple(selected_years))
-        # For full dashboard, we generate supplementary demo data for categories
-        # not yet available from Odoo (revenue, costs, etc.)
-        demo = generate_all_demo_data(selected_years)
-        data = demo
-        data['capex'] = capex_df if not capex_df.empty else demo['capex']
-        data['has_odoo'] = True
-        data['db'] = db
-        data['uid'] = uid
-        data['password'] = password
-    else:
-        data = generate_all_demo_data(selected_years)
-        data['has_odoo'] = False
-        data['db'] = None
-        data['uid'] = None
-        data['password'] = None
+    # Always generate demo data as a complete fallback
+    demo = generate_all_demo_data(selected_years)
+    years_tuple = tuple(selected_years)
 
-    return data
+    # Track which sections are using real vs demo data
+    data_sources = {}
+
+    if has_odoo:
+        # --- Revenue ---
+        odoo_revenue = fetch_revenue_data(db, uid, password, years_tuple)
+        if not odoo_revenue.empty:
+            demo['revenue'] = odoo_revenue
+            data_sources['revenue'] = 'odoo'
+        else:
+            data_sources['revenue'] = 'demo'
+
+        # --- Costs (COGS + OpEx) ---
+        odoo_costs = fetch_cost_data(db, uid, password, years_tuple)
+        if not odoo_costs.empty:
+            demo['costs'] = odoo_costs
+            data_sources['costs'] = 'odoo'
+        else:
+            data_sources['costs'] = 'demo'
+
+        # --- CAPEX ---
+        odoo_capex = fetch_capex_actuals(db, uid, password, tuple(selected_accounts), years_tuple)
+        if not odoo_capex.empty:
+            demo['capex'] = odoo_capex
+            data_sources['capex'] = 'odoo'
+        else:
+            data_sources['capex'] = 'demo'
+
+        # --- POS (optional, for customer metrics) ---
+        if ODOO_MODULES.get("pos"):
+            pos_data = fetch_pos_orders(db, uid, password, years_tuple)
+            if not pos_data.empty:
+                demo['pos_orders'] = pos_data
+                data_sources['pos'] = 'odoo'
+
+        # --- HR (optional, for labor metrics) ---
+        if ODOO_MODULES.get("hr"):
+            hr_data = fetch_employees(db, uid, password)
+            if not hr_data.empty:
+                demo['employees'] = hr_data
+                data_sources['hr'] = 'odoo'
+
+        demo['has_odoo'] = True
+        demo['db'] = db
+        demo['uid'] = uid
+        demo['password'] = password
+    else:
+        demo['has_odoo'] = False
+        demo['db'] = None
+        demo['uid'] = None
+        demo['password'] = None
+        data_sources = {s: 'demo' for s in ['revenue', 'costs', 'capex']}
+
+    demo['data_sources'] = data_sources
+    return demo
 
 
 # ──────────────────────────────────────────────
@@ -1344,6 +1396,165 @@ def render_comparative_tab(data, store_filter, selected_years):
 
 
 # ──────────────────────────────────────────────
+# TAB: SETTINGS & DIAGNOSTICS
+# ──────────────────────────────────────────────
+def render_settings_tab(data, selected_years):
+    """Account Explorer, data source diagnostics, and configuration helper."""
+    db = data['db']
+    uid = data['uid']
+    password = data['password']
+    has_odoo = data['has_odoo']
+    data_sources = data.get('data_sources', {})
+
+    # Data Source Status
+    section_header("Data Source Status", "Which sections are pulling from Odoo vs demo data")
+
+    source_labels = {
+        'odoo': ('Odoo (live)', 'good'),
+        'demo': ('Demo data', 'warning'),
+    }
+
+    status_items = []
+    for section_key, source in data_sources.items():
+        label, badge_class = source_labels.get(source, ('Unknown', 'danger'))
+        status_items.append(f"<tr>"
+                            f"<td style='padding: 6px 12px; font-weight: 600;'>{section_key.upper()}</td>"
+                            f"<td style='padding: 6px 12px;'>{badge(label, badge_class)}</td>"
+                            f"</tr>")
+
+    st.markdown(f"""
+    <table style="border-collapse: collapse; width: 100%; max-width: 400px;
+                   background: white; border-radius: 8px; overflow: hidden;
+                   box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
+        <thead><tr style="background: {COLORS['teal']}; color: white;">
+            <th style="padding: 8px 12px; text-align: left;">Section</th>
+            <th style="padding: 8px 12px; text-align: left;">Source</th>
+        </tr></thead>
+        <tbody>{''.join(status_items)}</tbody>
+    </table>
+    """, unsafe_allow_html=True)
+
+    if not has_odoo:
+        st.markdown("")
+        st.warning("Odoo credentials not configured. All data is demo. "
+                    "Add ODOO_USER and ODOO_PASSWORD to .streamlit/secrets.toml or Streamlit Cloud secrets.")
+
+    # Account Map Configuration
+    st.markdown("")
+    section_header("Current Account Map", "Account code patterns configured in config.py")
+
+    for sec_name, sec_entries in ACCOUNT_MAP.items():
+        with st.expander(f"{sec_name.upper()} ({len(sec_entries)} categories)", expanded=False):
+            rows = []
+            for cat_key, entry in sec_entries.items():
+                rows.append({
+                    'Category Key': cat_key,
+                    'Label': entry['label'],
+                    'Account Codes': ', '.join(entry['codes']),
+                    'Sign': entry.get('sign', 'abs'),
+                    'Group': entry.get('group', ''),
+                })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Account Explorer (Odoo only)
+    if has_odoo:
+        st.markdown("")
+        section_header("Account Explorer", "Discover actual account codes in your Odoo instance")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Chart of Accounts**")
+            if st.button("Fetch Chart of Accounts", key="fetch_coa"):
+                coa_df = fetch_chart_of_accounts(db, uid, password)
+                if not coa_df.empty:
+                    st.session_state['coa_df'] = coa_df
+                    st.success(f"Found {len(coa_df)} accounts")
+                else:
+                    st.warning("No accounts found or access denied.")
+
+            if 'coa_df' in st.session_state and not st.session_state['coa_df'].empty:
+                coa = st.session_state['coa_df']
+                # Filter
+                type_filter = st.multiselect(
+                    "Filter by account type:",
+                    options=sorted(coa['account_type'].unique()),
+                    key="coa_type_filter",
+                )
+                code_search = st.text_input("Search by code prefix:", key="coa_code_search",
+                                            placeholder="e.g. 8 or 40")
+                filtered_coa = coa.copy()
+                if type_filter:
+                    filtered_coa = filtered_coa[filtered_coa['account_type'].isin(type_filter)]
+                if code_search:
+                    filtered_coa = filtered_coa[filtered_coa['code'].str.startswith(code_search)]
+
+                st.dataframe(filtered_coa, use_container_width=True, hide_index=True,
+                             height=400)
+                st.caption(f"Showing {len(filtered_coa)} of {len(coa)} accounts")
+
+        with col2:
+            st.markdown("**Analytic Accounts (Store Mapping)**")
+            if st.button("Fetch Analytic Accounts", key="fetch_analytics"):
+                analytics_df = fetch_analytic_accounts(db, uid, password)
+                if not analytics_df.empty:
+                    st.session_state['analytics_df'] = analytics_df
+                    st.success(f"Found {len(analytics_df)} analytic accounts")
+                else:
+                    st.warning("No analytic accounts found.")
+
+            if 'analytics_df' in st.session_state and not st.session_state['analytics_df'].empty:
+                analytics = st.session_state['analytics_df']
+                # Show mapping status
+                for _, row in analytics.iterrows():
+                    mapped_store = ODOO_ID_TO_STORE.get(row['id'])
+                    icon = "mapped" if mapped_store else "unmapped"
+                    status = badge(mapped_store, "good") if mapped_store else badge("not mapped", "warning")
+                    st.markdown(f"ID **{row['id']}** — {row['name']} {status}",
+                                unsafe_allow_html=True)
+
+        # Data Availability Check
+        st.markdown("")
+        section_header("Data Availability Check", "Test which ACCOUNT_MAP sections have real data")
+
+        if st.button("Run Availability Check", key="check_avail"):
+            with st.spinner("Checking Odoo for data in each section..."):
+                avail = check_data_availability(db, uid, password, tuple(selected_years))
+                st.session_state['data_avail'] = avail
+
+        if 'data_avail' in st.session_state:
+            avail = st.session_state['data_avail']
+            for sec, info in avail.items():
+                status = "good" if info["has_data"] else ("warning" if info["configured"] else "danger")
+                label = (f"{info['row_count']:,} rows" if info["has_data"]
+                         else ("configured, no data" if info["configured"] else "not configured"))
+                st.markdown(f"**{sec.upper()}**: {badge(label, status)}", unsafe_allow_html=True)
+
+    else:
+        st.markdown("")
+        st.info("Connect to Odoo to use the Account Explorer. "
+                "This tool lets you discover account codes and verify your ACCOUNT_MAP configuration.")
+
+    # Configuration Reference
+    st.markdown("")
+    section_header("How to Configure", "Steps to connect real data")
+    st.markdown("""
+    1. **Set Odoo credentials** in `.streamlit/secrets.toml` or Streamlit Cloud secrets
+    2. **Open this Settings tab** and click "Fetch Chart of Accounts"
+    3. **Identify your account codes** — find revenue accounts (usually 8xxxxx),
+       COGS accounts (usually 4xxxxx), and operating expense accounts
+    4. **Edit `config.py`** — update the `ACCOUNT_MAP` dict with your real codes
+    5. **Restart the app** — sections with valid codes will show real Odoo data
+
+    Each ACCOUNT_MAP entry needs:
+    - `codes`: List of Odoo account code patterns (e.g. `["800000"]` or `["8%"]` for wildcards)
+    - `label`: Display name in the dashboard
+    - `sign`: `"credit"` for revenue, `"debit"` for expenses, `"abs"` for assets/CAPEX
+    """)
+
+
+# ──────────────────────────────────────────────
 # MAIN APPLICATION
 # ──────────────────────────────────────────────
 def main():
@@ -1363,11 +1574,25 @@ def main():
     # Load data
     data = load_data(selected_years, selected_accounts)
 
+    # Data source status banner
+    data_sources = data.get('data_sources', {})
+    odoo_sections = [k for k, v in data_sources.items() if v == 'odoo']
+    demo_sections = [k for k, v in data_sources.items() if v == 'demo']
+
     if not data['has_odoo']:
-        st.info("Running in demo mode. Connect Odoo for live data. Demo data shown for illustration.")
+        st.info("Running in demo mode — no Odoo credentials configured. "
+                "All data shown is illustrative. See the Settings tab to connect.")
+    elif demo_sections:
+        odoo_text = ', '.join(s.upper() for s in odoo_sections) if odoo_sections else 'none'
+        demo_text = ', '.join(s.upper() for s in demo_sections)
+        st.info(f"Connected to Odoo. Live data: **{odoo_text}**. "
+                f"Demo fallback: **{demo_text}**. "
+                f"Configure account codes in Settings tab to enable more sections.")
+    else:
+        st.success("All data sourced from Odoo.")
 
     # Tabs
-    tab_exec, tab_fin, tab_rev, tab_cost, tab_cust, tab_capex, tab_impact, tab_map, tab_compare = st.tabs([
+    tabs = st.tabs([
         "Executive Summary",
         "Financial Deep Dive",
         "Revenue Analytics",
@@ -1377,34 +1602,38 @@ def main():
         "Impact Dashboard",
         "Store Map",
         "Benchmarks",
+        "Settings",
     ])
 
-    with tab_exec:
+    with tabs[0]:
         render_executive_tab(data, store_filter)
 
-    with tab_fin:
+    with tabs[1]:
         render_financial_tab(data, store_filter)
 
-    with tab_rev:
+    with tabs[2]:
         render_revenue_tab(data, store_filter)
 
-    with tab_cost:
+    with tabs[3]:
         render_cost_tab(data, store_filter)
 
-    with tab_cust:
+    with tabs[4]:
         render_customers_tab(data, store_filter)
 
-    with tab_capex:
+    with tabs[5]:
         render_capex_tab(data, store_filter, selected_accounts, selected_years)
 
-    with tab_impact:
+    with tabs[6]:
         render_impact_tab(data)
 
-    with tab_map:
+    with tabs[7]:
         render_map_tab(data, store_filter)
 
-    with tab_compare:
+    with tabs[8]:
         render_comparative_tab(data, store_filter, selected_years)
+
+    with tabs[9]:
+        render_settings_tab(data, selected_years)
 
 
 if __name__ == "__main__":

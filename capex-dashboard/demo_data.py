@@ -42,12 +42,16 @@ def generate_capex_data(selected_years):
                 'month': f'{year}-{month:02d}',
                 'amount': round(amount, 2),
                 'description': f'{account_labels[acc_idx].split("(")[0].strip()} - {STORE_LOCATIONS[store]["name"]}',
-                'account': accounts[acc_idx],
+                'account_code': accounts[acc_idx],
                 'account_label': account_labels[acc_idx],
+                'cost_category': accounts[acc_idx],
+                'cost_label': account_labels[acc_idx],
                 'store_code': store,
                 'store_name': STORE_LOCATIONS[store]['name'],
                 'move_id': None,
                 'move_name': '',
+                'section': 'capex',
+                'group': 'capex',
             })
 
     return pd.DataFrame(rows)

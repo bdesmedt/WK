@@ -3,6 +3,14 @@ Wakuli Retail Analytics - Configuration
 ========================================
 Central configuration for store data, account mappings, brand constants,
 and all dashboard settings.
+
+HOW TO CONFIGURE FOR YOUR ODOO INSTANCE
+-----------------------------------------
+1. Run the "Account Explorer" diagnostic (Settings tab in dashboard sidebar)
+   to discover your actual Odoo chart of accounts.
+2. Update ACCOUNT_MAP below with real account code patterns.
+3. Each entry uses Odoo's =like operator: '8%' matches 800000, 801000, etc.
+   Use exact codes like '800000' for precision, or prefixes like '8%' for ranges.
 """
 
 # ──────────────────────────────────────────────
@@ -25,7 +33,6 @@ COLORS = {
     "red_light": "#FF6B6B",
 }
 
-# Chart color sequences for Plotly
 CHART_COLORS = [
     "#FF6B35", "#004E64", "#25A18E", "#F7B801",
     "#FF8066", "#006D8F", "#1B7A6B", "#2D3142",
@@ -35,7 +42,6 @@ CHART_COLORS = [
 CHART_COLORS_WARM = ["#FF6B35", "#FF8066", "#F7B801", "#25A18E", "#004E64"]
 CHART_COLORS_COOL = ["#004E64", "#006D8F", "#25A18E", "#1B7A6B", "#2D3142"]
 
-# Positive / negative indicators
 COLOR_POSITIVE = "#25A18E"
 COLOR_NEGATIVE = "#E63946"
 COLOR_NEUTRAL = "#B0B0B0"
@@ -68,7 +74,7 @@ STORE_LOCATIONS = {
     "OOH": {"name": "Overhead (All Stores)", "address": "Central Office", "city": "Amsterdam", "lat": 52.3676, "lon": 4.9041, "sqm": 0, "opened": "2021-01"},
 }
 
-# Odoo analytics IDs
+# Odoo analytics IDs (analytic_distribution keys in account.move.line)
 STORE_ODOO_IDS = {
     "LIN": 17046, "JPH": 17047, "HAP": 17048, "WAG": 17049, "AMS": 17050,
     "VIJZ": 17051, "TWIJN": 17052, "ZIEK": 17053, "WOU": 17054, "NOB": 17055,
@@ -79,54 +85,292 @@ STORE_ODOO_IDS = {
 
 ODOO_ID_TO_STORE = {v: k for k, v in STORE_ODOO_IDS.items()}
 
-# ──────────────────────────────────────────────
-# ACCOUNT MAPPINGS
-# ──────────────────────────────────────────────
-
-# CAPEX accounts
-CAPEX_ACCOUNTS = {
-    "037000": "CAPEX Winkels (Store Renovations)",
-    "032000": "WIA - Assets Under Construction",
-    "031000": "Bedrijfsinventaris (Business Inventory)",
-    "021000": "Koffiemachines (Coffee Machines)",
-    "013000": "Verbouwingen (Renovations)",
-}
-
-# Revenue accounts (for expanded dashboard)
-REVENUE_ACCOUNTS = {
-    "800000": "Coffee Sales",
-    "800100": "Food Sales",
-    "800200": "Merchandise Sales",
-    "800300": "Subscription Revenue",
-    "800400": "Delivery Revenue",
-}
-
-# Cost accounts
-COST_ACCOUNTS = {
-    "400000": "Cost of Goods - Coffee",
-    "400100": "Cost of Goods - Food",
-    "400200": "Cost of Goods - Merchandise",
-    "410000": "Labor Costs",
-    "420000": "Rent & Occupancy",
-    "430000": "Utilities",
-    "440000": "Marketing & Advertising",
-    "450000": "Equipment Maintenance",
-    "460000": "Supplies & Consumables",
-    "470000": "Insurance & Licenses",
-}
-
 # Wakuli Retail Holding company ID in Odoo
 RETAIL_HOLDING_ID = 2
 
+
 # ──────────────────────────────────────────────
-# PRODUCT CATEGORIES
+# ACCOUNT MAP — THE CORE CONFIGURATION
 # ──────────────────────────────────────────────
+# This is the single source of truth that maps Odoo account codes to
+# dashboard categories. Edit this to match your actual chart of accounts.
+#
+# Structure:
+#   section -> category_key -> {
+#       "codes": list of Odoo account code patterns (uses =like, so "8%" matches 800000)
+#       "label": Display name in the dashboard
+#       "sign":  How to interpret the balance field:
+#                "credit"  = revenue (positive amount = credit balance)
+#                "debit"   = expense (positive amount = debit balance)
+#                "abs"     = use absolute value (for CAPEX/asset entries)
+#       "group": Optional grouping for roll-ups (e.g. "cogs", "opex", "fixed")
+#   }
+#
+# To discover your actual account codes, use the Account Explorer in the
+# dashboard sidebar, or query Odoo:
+#   Accounting > Configuration > Chart of Accounts
+
+ACCOUNT_MAP = {
+    # ── REVENUE ──────────────────────────────────
+    # All revenue accounts. The dashboard sums these for total revenue,
+    # and breaks down by category for the Revenue Analytics tab.
+    "revenue": {
+        "coffee_sales": {
+            "codes": ["800000"],
+            "label": "Coffee Sales",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "food_sales": {
+            "codes": ["800100"],
+            "label": "Food Sales",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "merchandise_sales": {
+            "codes": ["800200"],
+            "label": "Merchandise Sales",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "subscription_revenue": {
+            "codes": ["800300"],
+            "label": "Subscription Revenue",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        "delivery_revenue": {
+            "codes": ["800400"],
+            "label": "Delivery Revenue",
+            "sign": "credit",
+            "group": "revenue",
+        },
+        # CATCH-ALL: Uncomment to pick up any revenue account by prefix:
+        # "other_revenue": {
+        #     "codes": ["8%"],
+        #     "label": "Other Revenue",
+        #     "sign": "credit",
+        #     "group": "revenue",
+        # },
+    },
+
+    # ── COST OF GOODS SOLD ───────────────────────
+    # Direct costs tied to products sold.
+    "cogs": {
+        "cogs_coffee": {
+            "codes": ["400000"],
+            "label": "COGS - Coffee Beans",
+            "sign": "debit",
+            "group": "cogs",
+        },
+        "cogs_food": {
+            "codes": ["400100"],
+            "label": "COGS - Food & Bakery",
+            "sign": "debit",
+            "group": "cogs",
+        },
+        "cogs_merchandise": {
+            "codes": ["400200"],
+            "label": "COGS - Merchandise",
+            "sign": "debit",
+            "group": "cogs",
+        },
+        "cogs_packaging": {
+            "codes": ["400300"],
+            "label": "COGS - Packaging",
+            "sign": "debit",
+            "group": "cogs",
+        },
+        # CATCH-ALL: Uncomment to pick up any COGS account by prefix:
+        # "cogs_other": {
+        #     "codes": ["40%"],
+        #     "label": "COGS - Other",
+        #     "sign": "debit",
+        #     "group": "cogs",
+        # },
+    },
+
+    # ── OPERATING EXPENSES ───────────────────────
+    # Non-COGS operating costs. Each maps to a cost_category used by the
+    # KPI engine to calculate labor%, rent%, etc.
+    "opex": {
+        "labor": {
+            "codes": ["410000"],
+            "label": "Labor Costs",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": False,
+        },
+        "rent": {
+            "codes": ["420000"],
+            "label": "Rent & Occupancy",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": True,
+        },
+        "utilities": {
+            "codes": ["430000"],
+            "label": "Utilities",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": True,
+        },
+        "marketing": {
+            "codes": ["440000"],
+            "label": "Marketing & Advertising",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": False,
+        },
+        "maintenance": {
+            "codes": ["450000"],
+            "label": "Equipment Maintenance",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": False,
+        },
+        "supplies": {
+            "codes": ["460000"],
+            "label": "Supplies & Consumables",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": False,
+        },
+        "insurance": {
+            "codes": ["470000"],
+            "label": "Insurance & Licenses",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": True,
+        },
+        "depreciation": {
+            "codes": ["480000"],
+            "label": "Depreciation & Amortization",
+            "sign": "debit",
+            "group": "opex",
+            "is_fixed": True,
+        },
+        # CATCH-ALL: Uncomment to pick up any OpEx account by prefix:
+        # "opex_other": {
+        #     "codes": ["4%"],
+        #     "label": "Other OpEx",
+        #     "sign": "debit",
+        #     "group": "opex",
+        #     "is_fixed": False,
+        # },
+    },
+
+    # ── CAPEX (already working) ──────────────────
+    "capex": {
+        "capex_stores": {
+            "codes": ["037000"],
+            "label": "CAPEX Winkels (Store Renovations)",
+            "sign": "abs",
+            "group": "capex",
+        },
+        "wia": {
+            "codes": ["032000"],
+            "label": "WIA - Assets Under Construction",
+            "sign": "abs",
+            "group": "capex",
+        },
+        "business_inventory": {
+            "codes": ["031000"],
+            "label": "Bedrijfsinventaris (Business Inventory)",
+            "sign": "abs",
+            "group": "capex",
+        },
+        "coffee_machines": {
+            "codes": ["021000"],
+            "label": "Koffiemachines (Coffee Machines)",
+            "sign": "abs",
+            "group": "capex",
+        },
+        "renovations": {
+            "codes": ["013000"],
+            "label": "Verbouwingen (Renovations)",
+            "sign": "abs",
+            "group": "capex",
+        },
+    },
+}
+
+# Convenience: flat dict of CAPEX account code -> label (used by sidebar checkboxes)
+CAPEX_ACCOUNTS = {
+    code: entry["label"]
+    for entry in ACCOUNT_MAP["capex"].values()
+    for code in entry["codes"]
+}
+
+
+def get_all_account_codes(section):
+    """Get all account code patterns for a given section of the ACCOUNT_MAP."""
+    codes = []
+    for entry in ACCOUNT_MAP.get(section, {}).values():
+        codes.extend(entry["codes"])
+    return codes
+
+
+def get_category_for_account_code(raw_code, section=None):
+    """Given an Odoo account code string, find the matching category key.
+
+    Tries exact match first, then prefix matching (longest prefix wins).
+    Returns (section, category_key, entry_dict) or (None, None, None).
+    """
+    sections_to_search = [section] if section else list(ACCOUNT_MAP.keys())
+    best_match = (None, None, None)
+    best_match_len = 0
+
+    for sec in sections_to_search:
+        for cat_key, entry in ACCOUNT_MAP.get(sec, {}).items():
+            for pattern in entry["codes"]:
+                # Convert Odoo =like pattern to a prefix for matching
+                prefix = pattern.rstrip('%')
+                if raw_code.startswith(prefix) and len(prefix) > best_match_len:
+                    best_match = (sec, cat_key, entry)
+                    best_match_len = len(prefix)
+                # Exact match always wins
+                if raw_code == pattern:
+                    return (sec, cat_key, entry)
+
+    return best_match
+
+
+def get_sign_multiplier(entry):
+    """Return +1 or -1 based on entry's sign convention.
+
+    - "credit": use credit - debit (positive for revenue)
+    - "debit":  use debit - credit (positive for expenses)
+    - "abs":    use absolute value of balance
+    """
+    sign = entry.get("sign", "abs")
+    if sign == "credit":
+        return -1  # balance = debit - credit, so negate for revenue
+    elif sign == "debit":
+        return 1
+    return 0  # "abs" handled separately
+
+
+# ──────────────────────────────────────────────
+# PRODUCT CATEGORIES (for revenue breakdown)
+# ──────────────────────────────────────────────
+# Maps revenue account category keys to product labels
 PRODUCT_CATEGORIES = {
     "coffee": {"label": "Coffee & Espresso", "icon": "coffee", "target_cogs_pct": 0.28},
     "food": {"label": "Food & Pastries", "icon": "cake", "target_cogs_pct": 0.32},
     "merchandise": {"label": "Merchandise", "icon": "shopping_bag", "target_cogs_pct": 0.45},
     "subscription": {"label": "Subscriptions", "icon": "autorenew", "target_cogs_pct": 0.25},
 }
+
+# Maps revenue ACCOUNT_MAP keys to product category keys (for category breakdown charts)
+REVENUE_TO_PRODUCT_CATEGORY = {
+    "coffee_sales": "coffee",
+    "food_sales": "food",
+    "merchandise_sales": "merchandise",
+    "subscription_revenue": "subscription",
+    "delivery_revenue": "coffee",  # delivery is mostly coffee
+}
+
 
 # ──────────────────────────────────────────────
 # DAYPART DEFINITIONS
@@ -143,34 +387,33 @@ DAYPARTS = {
 # KPI TARGETS & BENCHMARKS
 # ──────────────────────────────────────────────
 TARGETS = {
-    "gross_margin_pct": 0.68,          # 68% target
-    "net_margin_pct": 0.12,            # 12% target
-    "labor_cost_pct": 0.30,            # 30% of revenue
-    "rent_cost_pct": 0.12,             # 12% of revenue
-    "food_cost_pct": 0.30,             # 30% COGS ratio
-    "beverage_cost_pct": 0.25,         # 25% COGS ratio
-    "avg_transaction_value": 6.50,     # EUR
-    "revenue_per_sqm_month": 650,      # EUR/sqm/month
-    "revenue_per_labor_hour": 55,      # EUR
-    "customer_retention_pct": 0.45,    # 45% returning
-    "inventory_turnover": 24,          # times per year
-    "break_even_months": 18,           # months to break-even
+    "gross_margin_pct": 0.68,
+    "net_margin_pct": 0.12,
+    "labor_cost_pct": 0.30,
+    "rent_cost_pct": 0.12,
+    "food_cost_pct": 0.30,
+    "beverage_cost_pct": 0.25,
+    "avg_transaction_value": 6.50,
+    "revenue_per_sqm_month": 650,
+    "revenue_per_labor_hour": 55,
+    "customer_retention_pct": 0.45,
+    "inventory_turnover": 24,
+    "break_even_months": 18,
 }
 
 # ──────────────────────────────────────────────
 # IMPACT METRICS (Wakuli mission)
 # ──────────────────────────────────────────────
 IMPACT_DEFAULTS = {
-    "farmer_premium_pct": 0.35,        # 35% above market price
-    "direct_trade_pct": 0.92,          # 92% directly sourced
+    "farmer_premium_pct": 0.35,
+    "direct_trade_pct": 0.92,
     "farmers_supported": 847,
     "countries_sourced": 8,
     "compostable_packaging_pct": 0.88,
-    "co2_per_cup_grams": 68,           # grams CO2 per cup
-    "kg_coffee_per_month": 2800,       # kg across all stores
+    "co2_per_cup_grams": 68,
+    "kg_coffee_per_month": 2800,
 }
 
-# Coffee sourcing origins
 SOURCING_ORIGINS = [
     {"country": "Ethiopia", "region": "Yirgacheffe", "lat": 6.16, "lon": 38.20, "farmers": 234, "pct": 0.28},
     {"country": "Colombia", "region": "Huila", "lat": 2.53, "lon": -75.53, "farmers": 156, "pct": 0.18},
@@ -181,6 +424,32 @@ SOURCING_ORIGINS = [
     {"country": "Brazil", "region": "Minas Gerais", "lat": -18.51, "lon": -44.55, "farmers": 56, "pct": 0.07},
     {"country": "Uganda", "region": "Mt. Elgon", "lat": 1.13, "lon": 34.53, "farmers": 32, "pct": 0.03},
 ]
+
+
+# ──────────────────────────────────────────────
+# INVESTMENT DATA PER STORE (manual input)
+# ──────────────────────────────────────────────
+# Fill these in with actual buildout costs. Used for ROI and break-even.
+# Set to 0 or omit stores where data is unknown.
+STORE_INVESTMENTS = {
+    # "LIN": {"buildout": 75000, "equipment": 35000, "furniture": 12000, "working_capital": 20000},
+    # "JPH": {"buildout": 65000, "equipment": 32000, "furniture": 10000, "working_capital": 18000},
+    # ... fill in per store
+}
+
+
+# ──────────────────────────────────────────────
+# ODOO OPTIONAL MODULES
+# ──────────────────────────────────────────────
+# Set these to True if the corresponding Odoo modules are installed.
+# The dashboard will attempt to query these models for richer data.
+ODOO_MODULES = {
+    "pos": False,        # Odoo Point of Sale (pos.order, pos.order.line)
+    "hr": False,         # Odoo HR / Payroll (hr.employee)
+    "stock": False,      # Odoo Inventory (stock.move, stock.valuation.layer)
+    "asset": False,      # Odoo Assets (account.asset)
+}
+
 
 # ──────────────────────────────────────────────
 # APP CONFIGURATION
